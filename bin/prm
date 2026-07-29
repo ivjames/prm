@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# prm — operate CLI for the PRM site on the lab980 droplet.
+#
+# lab980 convention: each site ships bin/<name> symlinked onto PATH:
+#   ln -sf /var/www/prm/bin/prm /usr/local/bin/prm
+#
+# Subcommands: deploy · restart · logs · status · migrate · backup
+set -euo pipefail
+
+APP_DIR="${PRM_DIR:-/var/www/prm}"
+WEB_PROC="prm-web"
+WORKER_PROC="prm-worker"
+
+c_blue=$'\033[1;34m'; c_red=$'\033[1;31m'; c_off=$'\033[0m'
+log() { printf '%s==>%s %s\n' "$c_blue" "$c_off" "$*"; }
+die() { printf '%serror:%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
+
+usage() {
+  cat <<USAGE
+prm — operate the PRM site (dir: $APP_DIR)
+
+Usage: prm <command>
+
+  deploy     git pull -> npm ci -> npm run build -> migrate -> pm2 restart -> pm2 save
+  restart    pm2 restart both processes
+  logs       tail pm2 logs (both processes)
+  status     pm2 status for the two processes
+  migrate    apply Supabase migrations (supabase db push)
+  backup     dump the app-dir .env + a schema snapshot into data/backups/
+  help       this text
+USAGE
+}
+
+cd_app() { cd "$APP_DIR" || die "app dir $APP_DIR not found"; }
+
+cmd_deploy() {
+  cd_app
+  log "pulling latest"
+  git pull --ff-only
+  log "installing deps"
+  npm ci
+  log "building"
+  npm run build
+  log "applying migrations"
+  cmd_migrate
+  log "restarting pm2"
+  pm2 restart "$WEB_PROC" "$WORKER_PROC" --update-env || pm2 start ecosystem.config.cjs
+  pm2 save
+  log "deployed"
+}
+
+cmd_restart() { pm2 restart "$WEB_PROC" "$WORKER_PROC" --update-env; }
+cmd_logs()    { pm2 logs "$WEB_PROC" "$WORKER_PROC"; }
+cmd_status()  { pm2 status "$WEB_PROC" "$WORKER_PROC"; }
+
+cmd_migrate() {
+  cd_app
+  command -v supabase >/dev/null || die "supabase CLI not found; install it or run migrations manually (see DEPLOY.md)."
+  # Uses the linked project / SUPABASE_DB_URL. Non-interactive.
+  supabase db push
+}
+
+cmd_backup() {
+  cd_app
+  local stamp dest
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  dest="data/backups/$stamp"
+  mkdir -p "$dest"
+  [ -f .env ] && cp .env "$dest/env.bak"
+  # Schema-only snapshot (data lives in Supabase; back it up there too).
+  if command -v supabase >/dev/null; then
+    supabase db dump --schema public -f "$dest/schema.sql" 2>/dev/null || true
+  fi
+  log "backup written to $APP_DIR/$dest"
+}
+
+case "${1:-help}" in
+  deploy)  cmd_deploy;;
+  restart) cmd_restart;;
+  logs)    cmd_logs;;
+  status)  cmd_status;;
+  migrate) cmd_migrate;;
+  backup)  cmd_backup;;
+  help|-h|--help) usage;;
+  *) usage; exit 1;;
+esac

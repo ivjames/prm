@@ -1,0 +1,7 @@
+# Supabase project config. `supabase link --project-ref <ref>` sets the remote;
+# `supabase db push` applies everything in migrations/ in order.
+project_id = "prm"
+
+[db]
+# Postgres major version of the linked project.
+major_version = 15

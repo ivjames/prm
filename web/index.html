@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f172a" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <title>PRM</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        background: #0f172a;
+        color: #e2e8f0;
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+      }
+      main { max-width: 32rem; padding: 2rem; text-align: center; }
+      h1 { margin: 0 0 0.5rem; font-size: 1.75rem; }
+      p { color: #94a3b8; margin: 0.5rem 0; }
+      code { background: #1e293b; padding: 0.1rem 0.4rem; border-radius: 4px; }
+      .status { margin-top: 1.5rem; font-size: 0.9rem; }
+      .dot { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; background: #64748b; margin-right: 0.4rem; }
+      .dot.ok { background: #22c55e; }
+      .dot.down { background: #ef4444; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>PRM</h1>
+      <p>Personal relationship management. This is the web PWA shell served from the lab980 droplet; the Capacitor client build will replace it.</p>
+      <p class="status"><span class="dot" id="dot"></span><span id="status">checking backend…</span></p>
+    </main>
+    <script>
+      // Smoke check: does the server see its Supabase backend?
+      fetch("/api/readyz")
+        .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
+        .then(({ ok, j }) => {
+          const dot = document.getElementById("dot");
+          const status = document.getElementById("status");
+          if (ok && j.ok) {
+            dot.className = "dot ok";
+            status.textContent = "backend reachable (" + (j.backend || "supabase") + ")";
+          } else {
+            dot.className = "dot down";
+            status.textContent = "backend not ready: " + (j.reason || "unknown");
+          }
+        })
+        .catch((e) => {
+          document.getElementById("dot").className = "dot down";
+          document.getElementById("status").textContent = "server unreachable: " + e.message;
+        });
+    </script>
+  </body>
+</html>

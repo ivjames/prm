@@ -1,0 +1,10 @@
+{
+  "name": "PRM — Personal Relationship Management",
+  "short_name": "PRM",
+  "description": "Auto-updating contact timelines, cadence reminders, and voice-note capture.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": []
+}

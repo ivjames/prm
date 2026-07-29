@@ -1,6 +1,17 @@
 # Handoff
 
-This repo is at the design/architecture stage — **no application code has been written yet.** Everything below is the accumulated output of a scoping conversation; treat the `docs/` files as the spec to build from, not aspirational notes.
+> **Build status (updated):** no longer design-only. The backend spine is
+> scaffolded and deployable on the lab980 droplet (hybrid: **Supabase** backend
+> + web PWA and workers served from the droplet as `prm.lab980.com`). Done:
+> the full schema with RLS from day one (`supabase/migrations/`), the
+> encrypted OAuth token vault, the cadence recompute function, a web/API server
+> (`src/server.ts`), the ingestion + cadence workers with entity resolution
+> (`src/workers/`), pm2 + operate-CLI + provisioning runbook (`DEPLOY.md`).
+> **Not yet built:** the data-access OAuth flow (provider fetch in
+> `src/workers/ingest.ts` is a stub), voice capture, and the Capacitor client.
+> The spec below still governs — treat `docs/` as the source of truth.
+
+The `docs/` files are the accumulated output of a scoping conversation; treat them as the spec to build from, not aspirational notes.
 
 ## What this is
 
