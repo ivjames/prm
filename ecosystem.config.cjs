@@ -12,13 +12,18 @@
 // config.ts loads .env via dotenv from cwd, so cwd must be the app dir.
 const cwd = __dirname;
 
+// Fork mode, explicitly. Both processes are single-instance and one binds no
+// port at all, so cluster mode buys nothing here — and specifying `instances`
+// would make pm2 default to cluster, which routes startup crashes to the pm2
+// daemon log instead of the app's own log (and diverges from every other
+// lab980 site, all of which run fork). Keep them fork.
 module.exports = {
   apps: [
     {
       name: "prm-web",
       cwd,
       script: "dist/server.js",
-      instances: 1,
+      exec_mode: "fork",
       autorestart: true,
       max_restarts: 10,
       env: { NODE_ENV: "production" },
@@ -27,7 +32,7 @@ module.exports = {
       name: "prm-worker",
       cwd,
       script: "dist/workers/index.js",
-      instances: 1,
+      exec_mode: "fork",
       autorestart: true,
       max_restarts: 10,
       env: { NODE_ENV: "production" },
