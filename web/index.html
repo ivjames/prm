@@ -7,133 +7,388 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <title>PRM</title>
     <style>
-      :root { color-scheme: light dark; }
+      :root {
+        color-scheme: dark;
+        --bg: #0f172a;
+        --panel: #1e293b;
+        --panel-2: #172033;
+        --border: #334155;
+        --text: #e2e8f0;
+        --muted: #94a3b8;
+        --dim: #64748b;
+        --green: #22c55e;
+        --amber: #f59e0b;
+        --red: #ef4444;
+        --accent: #38bdf8;
+      }
       * { box-sizing: border-box; }
+      html, body { height: 100%; }
       body {
         margin: 0;
-        font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-        background: #0f172a;
-        color: #e2e8f0;
-        display: grid;
-        place-items: center;
-        min-height: 100vh;
+        font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
       }
-      main { width: min(28rem, 92vw); padding: 2rem; }
-      h1 { margin: 0 0 0.25rem; font-size: 1.75rem; }
-      .tag { color: #94a3b8; margin: 0 0 1.5rem; font-size: 0.95rem; }
-      .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 1.25rem; }
-      label { display: block; font-size: 0.8rem; color: #94a3b8; margin: 0.6rem 0 0.2rem; }
-      input {
+      button, input, textarea { font: inherit; color: inherit; }
+      a { color: var(--accent); }
+
+      /* ---- centered auth card (signed-out) ---- */
+      .center { min-height: 100dvh; display: grid; place-items: center; padding: 1.5rem; }
+      .authwrap { width: min(28rem, 94vw); }
+      h1 { margin: 0 0 0.25rem; font-size: 1.6rem; letter-spacing: -0.01em; }
+      .tag { color: var(--muted); margin: 0 0 1.25rem; font-size: 0.9rem; }
+      .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; }
+      label { display: block; font-size: 0.78rem; color: var(--muted); margin: 0.6rem 0 0.2rem; }
+      input, textarea {
         width: 100%; padding: 0.55rem 0.7rem; border-radius: 8px;
-        border: 1px solid #334155; background: #0f172a; color: #e2e8f0; font: inherit;
+        border: 1px solid var(--border); background: var(--bg);
       }
-      button, .btn {
-        display: inline-block; width: 100%; margin-top: 0.9rem; padding: 0.6rem 0.9rem;
-        border: 0; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer;
-        text-align: center; text-decoration: none;
+      input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+      .btn {
+        display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+        width: 100%; margin-top: 0.9rem; padding: 0.6rem 0.9rem;
+        border: 0; border-radius: 8px; font-weight: 600; cursor: pointer; text-decoration: none;
       }
-      .btn-primary { background: #22c55e; color: #06210f; }
-      .btn-google { background: #e2e8f0; color: #0f172a; }
-      .btn-ghost { background: transparent; color: #94a3b8; border: 1px solid #334155; }
-      .sep { text-align: center; color: #64748b; font-size: 0.8rem; margin: 0.9rem 0; }
-      .msg { min-height: 1.2rem; margin-top: 0.6rem; font-size: 0.85rem; color: #f87171; }
-      .who { font-size: 1.05rem; }
-      .who b { color: #fff; }
-      .status { margin-top: 1.25rem; font-size: 0.85rem; color: #94a3b8; }
-      .dot { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; background: #64748b; margin-right: 0.4rem; }
-      .dot.ok { background: #22c55e; } .dot.down { background: #ef4444; }
-      .hidden { display: none; }
+      .btn-primary { background: var(--green); color: #06210f; }
+      .btn-google { background: var(--text); color: var(--bg); }
+      .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+      .btn-sm { width: auto; margin: 0; padding: 0.4rem 0.7rem; font-size: 0.85rem; font-weight: 600; }
+      .sep { text-align: center; color: var(--dim); font-size: 0.8rem; margin: 0.9rem 0; }
+      .msg { min-height: 1.1rem; margin-top: 0.5rem; font-size: 0.85rem; color: var(--red); }
+      .hidden { display: none !important; }
+
+      /* ---- app shell (signed-in) ---- */
+      .app { display: flex; flex-direction: column; min-height: 100dvh; }
+      .topbar {
+        display: flex; align-items: center; gap: 0.75rem;
+        padding: 0.7rem 1rem; border-bottom: 1px solid var(--border); background: var(--panel-2);
+        position: sticky; top: 0; z-index: 5;
+      }
+      .brand { font-weight: 700; letter-spacing: -0.01em; }
+      .topbar .who { color: var(--muted); font-size: 0.85rem; margin-left: auto; max-width: 40vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      @media (max-width: 560px) { .topbar .who { display: none; } #connect-google { margin-left: auto; } }
+      .pill { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.78rem; padding: 0.2rem 0.55rem; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+      .dot { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--dim); }
+      .dot.ok { background: var(--green); } .dot.down { background: var(--red); }
+
+      .cols { display: grid; grid-template-columns: minmax(18rem, 24rem) 1fr; flex: 1; min-height: 0; }
+      @media (max-width: 720px) { .cols { grid-template-columns: 1fr; } .detail-hidden-mobile { display: none; } }
+
+      /* people list */
+      .list { border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+      .list-tools { padding: 0.75rem; display: flex; gap: 0.5rem; align-items: center; border-bottom: 1px solid var(--border); }
+      .list-tools input { flex: 1; }
+      .people { overflow-y: auto; flex: 1; }
+      .person {
+        display: flex; align-items: center; gap: 0.6rem; width: 100%;
+        padding: 0.7rem 0.85rem; border: 0; border-bottom: 1px solid var(--border);
+        background: transparent; text-align: left; cursor: pointer;
+      }
+      .person:hover { background: var(--panel); }
+      .person.active { background: var(--panel); box-shadow: inset 3px 0 0 var(--accent); }
+      .avatar { width: 2rem; height: 2rem; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 0.8rem; background: #334155; color: #cbd5e1; flex: none; }
+      .p-main { min-width: 0; flex: 1; }
+      .p-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .p-sub { font-size: 0.75rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .badge { font-size: 0.68rem; font-weight: 700; padding: 0.12rem 0.4rem; border-radius: 999px; flex: none; }
+      .badge.overdue { background: rgba(239,68,68,0.15); color: #fca5a5; }
+      .badge.due { background: rgba(245,158,11,0.15); color: #fcd34d; }
+      .badge.ok { background: rgba(34,197,94,0.13); color: #86efac; }
+
+      /* detail / timeline */
+      .detail { overflow-y: auto; padding: 1.1rem 1.25rem; }
+      .detail h2 { margin: 0 0 0.2rem; font-size: 1.3rem; }
+      .tags { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0.4rem 0 0.9rem; }
+      .chip { font-size: 0.72rem; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0.1rem 0.5rem; }
+      .notes { color: var(--muted); font-size: 0.9rem; margin: 0 0 1.1rem; white-space: pre-wrap; }
+      .tl-head { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--dim); margin: 0 0 0.5rem; }
+      .tl { list-style: none; margin: 0; padding: 0; }
+      .tl li { display: flex; gap: 0.7rem; padding: 0.55rem 0; border-bottom: 1px solid var(--border); }
+      .tl .icon { font-size: 1rem; width: 1.4rem; text-align: center; flex: none; }
+      .tl .body { min-width: 0; flex: 1; }
+      .tl .sum { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .tl .meta { font-size: 0.74rem; color: var(--muted); }
+      .empty { color: var(--dim); padding: 2.5rem 1rem; text-align: center; }
+      .backlink { display: none; }
+      @media (max-width: 720px) { .backlink { display: inline-flex; margin-bottom: 0.75rem; } }
+
+      /* modal */
+      .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: grid; place-items: center; padding: 1.5rem; z-index: 20; }
+      .modal { width: min(24rem, 94vw); }
+      .row { display: flex; gap: 0.6rem; }
+      .row .btn { margin-top: 1rem; }
     </style>
   </head>
   <body>
-    <main>
-      <h1>PRM</h1>
-      <p class="tag">Personal relationship management — web shell on the lab980 droplet.</p>
+    <!-- ================= signed-out ================= -->
+    <div id="auth-view" class="center hidden">
+      <div class="authwrap">
+        <h1>PRM</h1>
+        <p class="tag">Personal relationship management.</p>
+        <section class="card">
+          <a class="btn btn-google" href="/api/auth/login/google">Sign in with Google</a>
+          <div class="sep">— or —</div>
+          <form id="pw-form">
+            <label for="email">Email</label>
+            <input id="email" type="email" autocomplete="username" required />
+            <label for="password">Password</label>
+            <input id="password" type="password" autocomplete="current-password" required />
+            <button class="btn btn-primary" type="submit">Sign in</button>
+          </form>
+          <div class="msg" id="signin-msg"></div>
+        </section>
+      </div>
+    </div>
 
-      <!-- signed-out -->
-      <section id="signin" class="card hidden">
-        <a class="btn btn-google" href="/api/auth/login/google">Sign in with Google</a>
-        <div class="sep">— or —</div>
-        <form id="pw-form">
-          <label for="email">Email</label>
-          <input id="email" type="email" autocomplete="username" required />
-          <label for="password">Password</label>
-          <input id="password" type="password" autocomplete="current-password" required />
-          <button class="btn-primary" type="submit">Sign in</button>
+    <!-- ================= signed-in ================= -->
+    <div id="app-view" class="app hidden">
+      <div class="topbar">
+        <span class="brand">PRM</span>
+        <span class="pill" id="connect-pill"></span>
+        <span class="who" id="who-email"></span>
+        <a class="btn btn-ghost btn-sm" id="connect-google" href="/api/connect/google" title="Grant background read access to Gmail &amp; Calendar">Connect Google</a>
+        <button class="btn btn-ghost btn-sm" id="signout">Sign out</button>
+      </div>
+      <div class="cols">
+        <div class="list" id="list-col">
+          <div class="list-tools">
+            <input id="search" type="search" placeholder="Search contacts…" autocomplete="off" />
+            <button class="btn btn-primary btn-sm" id="add-btn">+ Add</button>
+          </div>
+          <div class="people" id="people"></div>
+        </div>
+        <div class="detail detail-hidden-mobile" id="detail">
+          <div class="empty">Select a contact to see their timeline.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= add-contact modal ================= -->
+    <div id="modal" class="modal-bg hidden">
+      <div class="card modal">
+        <h1 style="font-size:1.1rem;margin-bottom:0.5rem">Add contact</h1>
+        <form id="add-form">
+          <label for="c-name">Name</label>
+          <input id="c-name" type="text" required />
+          <label for="c-tags">Tags <span style="color:var(--dim)">(comma-separated)</span></label>
+          <input id="c-tags" type="text" placeholder="family, work" />
+          <div class="row">
+            <button type="button" class="btn btn-ghost" id="add-cancel">Cancel</button>
+            <button type="submit" class="btn btn-primary">Create</button>
+          </div>
+          <div class="msg" id="add-msg"></div>
         </form>
-        <div class="msg" id="signin-msg"></div>
-      </section>
-
-      <!-- signed-in -->
-      <section id="account" class="card hidden">
-        <p class="who">Signed in as <b id="who-email"></b></p>
-        <div class="msg" id="connected-msg" style="color:#22c55e"></div>
-        <a class="btn btn-google" href="/api/connect/google">Connect Gmail &amp; Calendar</a>
-        <button class="btn-ghost" id="signout">Sign out</button>
-      </section>
-
-      <p class="status"><span class="dot" id="dot"></span><span id="status">checking backend…</span></p>
-    </main>
+      </div>
+    </div>
 
     <script>
       const $ = (id) => document.getElementById(id);
       const show = (el, on) => el.classList.toggle("hidden", !on);
+      const esc = (s) =>
+        String(s ?? "").replace(/[&<>"']/g, (c) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]),
+        );
 
-      async function refreshAuth() {
+      async function api(path, opts) {
+        const r = await fetch(path, { credentials: "same-origin", ...opts });
+        if (!r.ok) {
+          const j = await r.json().catch(() => ({}));
+          throw new Error(j.error || `${r.status}`);
+        }
+        return r.json();
+      }
+
+      const state = { people: [], selectedId: null, filter: "" };
+
+      // ---- source / direction glyphs ----
+      const SRC = { gmail: "✉️", gcal: "📅", graph: "✉️", manual: "✍️", voice: "🎙️" };
+      const DIR = { in: "←", out: "→", mutual: "↔" };
+
+      // cadence embed can arrive as [] / [{next_due}] / {next_due} / null
+      function nextDue(p) {
+        const c = p.next_due;
+        const row = Array.isArray(c) ? c[0] : c;
+        return row && row.next_due ? new Date(row.next_due) : null;
+      }
+      function dueBadge(p) {
+        const due = nextDue(p);
+        if (!due) return "";
+        const days = (due - Date.now()) / 86400000;
+        if (days < 0) return '<span class="badge overdue">overdue</span>';
+        if (days < 3) return '<span class="badge due">soon</span>';
+        return "";
+      }
+      const initials = (name) =>
+        (name || "?").trim().split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase() || "").join("") || "?";
+      const fmtDate = (iso) => {
+        const d = new Date(iso);
+        return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+      };
+
+      // ---- people list ----
+      async function loadPeople() {
         try {
-          const r = await fetch("/api/auth/me", { credentials: "same-origin" });
-          if (r.ok) {
-            const { user } = await r.json();
-            $("who-email").textContent = user?.email ?? user?.id ?? "(unknown)";
-            if (new URLSearchParams(location.search).get("connected") === "google") {
-              $("connected-msg").textContent = "Gmail & Calendar connected — ingestion will pick it up shortly.";
-            }
-            show($("account"), true);
-            show($("signin"), false);
-          } else {
-            show($("signin"), true);
-            show($("account"), false);
-          }
-        } catch {
-          show($("signin"), true);
+          const { people } = await api("/api/people");
+          state.people = people || [];
+          renderPeople();
+        } catch (e) {
+          $("people").innerHTML = `<div class="empty">Couldn't load contacts: ${esc(e.message)}</div>`;
+        }
+      }
+      function renderPeople() {
+        const q = state.filter.trim().toLowerCase();
+        const rows = state.people.filter((p) => !q || (p.name || "").toLowerCase().includes(q));
+        if (rows.length === 0) {
+          $("people").innerHTML = `<div class="empty">${
+            state.people.length === 0
+              ? "No contacts yet. They appear automatically as email &amp; calendar activity is ingested — or add one manually."
+              : "No matches."
+          }</div>`;
+          return;
+        }
+        $("people").innerHTML = rows
+          .map((p) => {
+            const tags = (p.tags || []).join(" · ");
+            return `<button class="person ${p.id === state.selectedId ? "active" : ""}" data-id="${esc(p.id)}">
+              <span class="avatar">${esc(initials(p.name))}</span>
+              <span class="p-main">
+                <span class="p-name">${esc(p.name)}</span>
+                ${tags ? `<span class="p-sub">${esc(tags)}</span>` : ""}
+              </span>
+              ${dueBadge(p)}
+            </button>`;
+          })
+          .join("");
+      }
+
+      // ---- person detail / timeline ----
+      async function selectPerson(id) {
+        state.selectedId = id;
+        renderPeople();
+        const detail = $("detail");
+        detail.classList.remove("detail-hidden-mobile");
+        detail.innerHTML = `<div class="empty">Loading…</div>`;
+        try {
+          const { person, timeline } = await api(`/api/people/${encodeURIComponent(id)}`);
+          detail.innerHTML = renderDetail(person, timeline || []);
+        } catch (e) {
+          detail.innerHTML = `<div class="empty">Couldn't load: ${esc(e.message)}</div>`;
+        }
+      }
+      function renderDetail(person, timeline) {
+        const tags = (person.tags || [])
+          .map((t) => `<span class="chip">${esc(t)}</span>`)
+          .join("");
+        const items = timeline.length
+          ? timeline
+              .map(
+                (i) => `<li>
+                  <span class="icon" title="${esc(i.source)}">${SRC[i.source] || "•"}</span>
+                  <span class="body">
+                    <div class="sum">${esc(i.summary || "(no subject)")}</div>
+                    <div class="meta">${esc(DIR[i.direction] || "")} ${esc(i.source)} · ${esc(fmtDate(i.occurred_at))}</div>
+                  </span>
+                </li>`,
+              )
+              .join("")
+          : `<div class="empty">No interactions yet.</div>`;
+        return `
+          <button class="btn btn-ghost btn-sm backlink" id="back-btn">← Contacts</button>
+          <h2>${esc(person.name)}</h2>
+          ${tags ? `<div class="tags">${tags}</div>` : ""}
+          ${person.notes ? `<p class="notes">${esc(person.notes)}</p>` : ""}
+          <div class="tl-head">Timeline${timeline.length ? ` · ${timeline.length}` : ""}</div>
+          <ul class="tl">${items}</ul>`;
+      }
+
+      // ---- add contact ----
+      function openModal(open) {
+        show($("modal"), open);
+        if (open) { $("c-name").value = ""; $("c-tags").value = ""; $("add-msg").textContent = ""; $("c-name").focus(); }
+      }
+      async function addContact(e) {
+        e.preventDefault();
+        $("add-msg").textContent = "";
+        const name = $("c-name").value.trim();
+        const tags = $("c-tags").value.split(",").map((t) => t.trim()).filter(Boolean);
+        if (!name) return;
+        try {
+          await api("/api/people", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ name, tags }),
+          });
+          openModal(false);
+          await loadPeople();
+        } catch (err) {
+          $("add-msg").textContent = err.message || "couldn't create";
         }
       }
 
+      // ---- auth ----
+      async function refreshAuth() {
+        try {
+          const { user } = await api("/api/auth/me");
+          $("who-email").textContent = user?.email || user?.id || "";
+          show($("auth-view"), false);
+          show($("app-view"), true);
+          if (new URLSearchParams(location.search).get("connected") === "google") {
+            history.replaceState({}, "", location.pathname);
+          }
+          await Promise.all([loadPeople(), refreshConnect()]);
+        } catch {
+          show($("app-view"), false);
+          show($("auth-view"), true);
+        }
+      }
+      async function refreshConnect() {
+        // Backend health as the connection pill; keeps the old readyz signal.
+        const pill = $("connect-pill");
+        try {
+          const j = await api("/api/readyz");
+          pill.innerHTML = `<span class="dot ok"></span> ${esc(j.backend || "backend")}`;
+        } catch (e) {
+          pill.innerHTML = `<span class="dot down"></span> offline`;
+        }
+      }
+
+      // ---- wire up ----
       $("pw-form").addEventListener("submit", async (e) => {
         e.preventDefault();
         $("signin-msg").textContent = "";
-        const res = await fetch("/api/auth/signin", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          credentials: "same-origin",
-          body: JSON.stringify({ email: $("email").value, password: $("password").value }),
-        });
-        if (res.ok) {
+        try {
+          await api("/api/auth/signin", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ email: $("email").value, password: $("password").value }),
+          });
           refreshAuth();
-        } else {
-          const j = await res.json().catch(() => ({}));
-          $("signin-msg").textContent = j.error || "sign-in failed";
+        } catch (err) {
+          $("signin-msg").textContent = err.message || "sign-in failed";
         }
       });
-
       $("signout").addEventListener("click", async () => {
         await fetch("/api/auth/signout", { method: "POST", credentials: "same-origin" });
+        state.selectedId = null;
         refreshAuth();
       });
-
-      // backend health indicator
-      fetch("/api/readyz")
-        .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
-        .then(({ ok, j }) => {
-          $("dot").className = "dot " + (ok && j.ok ? "ok" : "down");
-          $("status").textContent = ok && j.ok
-            ? "backend reachable (" + (j.backend || "supabase") + ")"
-            : "backend not ready: " + (j.reason || "unknown");
-        })
-        .catch((e) => {
-          $("dot").className = "dot down";
-          $("status").textContent = "server unreachable: " + e.message;
-        });
+      $("search").addEventListener("input", (e) => { state.filter = e.target.value; renderPeople(); });
+      $("people").addEventListener("click", (e) => {
+        const btn = e.target.closest(".person");
+        if (btn) selectPerson(btn.dataset.id);
+      });
+      $("detail").addEventListener("click", (e) => {
+        if (e.target.closest("#back-btn")) {
+          state.selectedId = null;
+          renderPeople();
+          $("detail").classList.add("detail-hidden-mobile");
+          $("detail").innerHTML = `<div class="empty">Select a contact to see their timeline.</div>`;
+        }
+      });
+      $("add-btn").addEventListener("click", () => openModal(true));
+      $("add-cancel").addEventListener("click", () => openModal(false));
+      $("modal").addEventListener("click", (e) => { if (e.target === $("modal")) openModal(false); });
+      $("add-form").addEventListener("submit", addContact);
 
       refreshAuth();
     </script>
