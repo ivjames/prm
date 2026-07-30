@@ -1,6 +1,8 @@
 import { Router, Response } from "express";
+import type { Provider } from "@supabase/supabase-js";
 import { AuthedRequest } from "./auth";
 import { serverClient } from "../supabase";
+import { config } from "../config";
 
 /**
  * Cookie-session endpoints. Each builds a per-request @supabase/ssr client;
@@ -21,6 +23,35 @@ sessionRouter.post("/signin", async (req: AuthedRequest, res: Response, next) =>
     const { data, error } = await db.auth.signInWithPassword({ email, password });
     if (error) return res.status(401).json({ error: error.message });
     res.json({ user: { id: data.user?.id, email: data.user?.email } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/auth/login/:provider — start a login-OAuth flow (e.g. Google) from
+// the server. The @supabase/ssr client generates the PKCE verifier and stashes
+// it in a cookie (via the adapter) before we 302 to the provider; the verifier
+// comes back on /callback for the code exchange. Login only — data-access
+// scopes for Gmail/Calendar ingestion are a separate flow (see /api/connect).
+const LOGIN_PROVIDERS = new Set<Provider>(["google"]);
+sessionRouter.get("/login/:provider", async (req: AuthedRequest, res: Response, next) => {
+  try {
+    const provider = req.params.provider as Provider;
+    if (!LOGIN_PROVIDERS.has(provider)) {
+      return res.status(400).json({ error: `unsupported provider: ${req.params.provider}` });
+    }
+    const db = serverClient(req, res);
+    const { data, error } = await db.auth.signInWithOAuth({
+      provider,
+      options: {
+        redirectTo: `${config.publicOrigin}/api/auth/callback`,
+        skipBrowserRedirect: true,
+      },
+    });
+    if (error || !data?.url) {
+      return res.status(500).json({ error: error?.message ?? "could not start OAuth" });
+    }
+    res.redirect(data.url);
   } catch (err) {
     next(err);
   }
