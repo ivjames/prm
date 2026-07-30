@@ -18,6 +18,7 @@ export interface RawTouchpoint {
   direction: "in" | "out" | "mutual";
   occurredAt: string; // ISO
   summary: string; // subject / title — metadata only, not full bodies
+  link?: string; // deep link to open the message/event in the provider's UI
   participants: { type: IdentifierType; value: string; displayName?: string }[];
 }
 
@@ -157,6 +158,8 @@ function gmailToTouchpoint(m: any, owner: string): RawTouchpoint | null {
     direction: ownerIsSender ? "out" : "in",
     occurredAt: new Date(Number(m.internalDate)).toISOString(),
     summary: headers.subject ?? "(no subject)",
+    // Opens the exact message in Gmail (All Mail, so it resolves wherever it lives).
+    link: `https://mail.google.com/mail/u/0/#all/${m.id}`,
     participants,
   };
 }
@@ -217,6 +220,7 @@ function calendarEventToTouchpoint(ev: any, owner: string): RawTouchpoint | null
     direction: "mutual",
     occurredAt: new Date(when).toISOString(),
     summary: ev.summary ?? "(untitled event)",
+    link: ev.htmlLink || undefined, // Google's direct link to the event
     participants,
   };
 }
@@ -314,6 +318,7 @@ async function persistTouchpoint(ownerId: string, tp: RawTouchpoint): Promise<vo
         direction: tp.direction,
         occurred_at: tp.occurredAt,
         summary: tp.summary,
+        link: tp.link ?? null,
       },
       { onConflict: "owner_id,source,external_id" },
     )
