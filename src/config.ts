@@ -45,6 +45,13 @@ export const config = {
     ingest: optional("INGEST_CRON", "*/15 * * * *"),
     cadence: optional("CADENCE_CRON", "0 * * * *"),
   },
+
+  // One-shot historical backfill (`prm backfill [days]`). Deeper lookback +
+  // pagination than the routine poll; maxPerSource bounds API calls per source.
+  backfill: {
+    days: Number(optional("BACKFILL_DAYS", "180")),
+    maxPerSource: Number(optional("BACKFILL_MAX", "2000")),
+  },
 };
 
 /** Assert the vars a given process role needs; call at boot for a clear error. */

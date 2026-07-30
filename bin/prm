@@ -26,9 +26,10 @@ Usage: prm <command>
   logs       tail pm2 logs (both processes)
   status     pm2 status for the two processes
   migrate    apply Supabase migrations (supabase db push)
-  ingest     run one ingestion poll now (on-demand; doesn't wait for the cron)
-  cadence    run one cadence/overdue recompute now (on-demand)
-  cleanup    bulk-archive junk contacts (all-automated senders; reversible)
+  ingest        run one ingestion poll now (on-demand; doesn't wait for the cron)
+  backfill [d]  deep historical pull, d days back (default 180), paginated + filtered
+  cadence       run one cadence/overdue recompute now (on-demand)
+  cleanup       bulk-archive junk contacts (all-automated senders; reversible)
   backup     dump the app-dir .env + a schema snapshot into data/backups/
   help       this text
 USAGE
@@ -68,6 +69,14 @@ cmd_once() {
 cmd_ingest()  { cmd_once ingest; }
 cmd_cadence() { cmd_once cadence; }
 cmd_cleanup() { cmd_once cleanup; }
+# backfill [days]: deep historical pull. Passes the day count via env so the
+# worker's config picks it up; empty -> default (180).
+cmd_backfill() {
+  cd_app
+  [ -f dist/workers/index.js ] || die "dist/workers/index.js not found — run 'npm run build' (or 'prm deploy') first."
+  log "backfilling history (${1:-default} days) — this can take a few minutes"
+  BACKFILL_DAYS="${1:-}" node dist/workers/index.js --once backfill
+}
 
 # migrate [--soft]
 # Migrations on this hybrid setup are applied out-of-band against Supabase
@@ -108,9 +117,10 @@ case "${1:-help}" in
   logs)    cmd_logs;;
   status)  cmd_status;;
   migrate) cmd_migrate;;
-  ingest)  cmd_ingest;;
-  cadence) cmd_cadence;;
-  cleanup) cmd_cleanup;;
+  ingest)   cmd_ingest;;
+  backfill) cmd_backfill "${2:-}";;
+  cadence)  cmd_cadence;;
+  cleanup)  cmd_cleanup;;
   backup)  cmd_backup;;
   help|-h|--help) usage;;
   *) usage; exit 1;;

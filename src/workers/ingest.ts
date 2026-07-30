@@ -1,4 +1,5 @@
 import { serviceClient } from "../supabase";
+import { config } from "../config";
 import { logger } from "../lib/logger";
 import { resolvePerson, IdentifierType } from "./entity-resolution";
 import { GoogleToken, refresh } from "../lib/google-oauth";
@@ -122,61 +123,107 @@ function toParticipants(owner: string, ...addrs: ParsedAddress[]): RawTouchpoint
 
 const DEFAULT_LOOKBACK_S = 7 * 24 * 3600;
 
-async function fetchGmail(account: Account, accessToken: string): Promise<RawTouchpoint[]> {
-  const since = account.last_cursor
-    ? Number(account.last_cursor)
-    : Math.floor(Date.now() / 1000) - DEFAULT_LOOKBACK_S;
-  // Balanced junk filter: exclude Gmail's bulk categories at the query level so
-  // newsletters/promotions/social/notifications never enter the pipeline. This
-  // keeps the Primary inbox + all Sent mail.
-  const query = `after:${since} -category:promotions -category:social -category:updates -category:forums`;
-  const list = await gapi(
-    `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25&q=${encodeURIComponent(query)}`,
-    accessToken,
+const GMAIL_META_HEADERS =
+  "&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject" +
+  "&metadataHeaders=List-Unsubscribe&metadataHeaders=List-Id&metadataHeaders=Precedence";
+// Exclude Gmail's bulk categories at the query level (keeps Primary + all Sent).
+const GMAIL_QUERY_FILTER = "-category:promotions -category:social -category:updates -category:forums";
+const INCREMENTAL_MAX = 25; // messages/events per routine poll
+
+/**
+ * Convert one fetched Gmail metadata message to a touchpoint, or null if the
+ * balanced junk filter rejects it (bulk/list headers, or no human counterpart).
+ */
+function gmailToTouchpoint(m: any, owner: string): RawTouchpoint | null {
+  const headers: Record<string, string> = Object.fromEntries(
+    (m.payload?.headers ?? []).map((h: any) => [String(h.name).toLowerCase(), h.value]),
   );
-  const ids: string[] = (list.messages ?? []).map((m: any) => m.id);
+  const precedence = (headers["precedence"] ?? "").toLowerCase();
+  if (headers["list-unsubscribe"] || headers["list-id"] || ["bulk", "list", "junk"].includes(precedence)) {
+    return null;
+  }
+  const from = parseAddresses(headers.from);
+  const ownerIsSender = from.some((a) => a.email === owner);
+  const participants = toParticipants(
+    owner,
+    ...from,
+    ...parseAddresses(headers.to),
+    ...parseAddresses(headers.cc),
+  ).filter((p) => !isRoleAddress(p.value));
+  if (participants.length === 0) return null;
+  return {
+    externalId: m.id,
+    source: "gmail",
+    direction: ownerIsSender ? "out" : "in",
+    occurredAt: new Date(Number(m.internalDate)).toISOString(),
+    summary: headers.subject ?? "(no subject)",
+    participants,
+  };
+}
+
+/**
+ * Fetch Gmail from `sinceEpoch` (unix seconds), paging until `capMessages`
+ * messages are examined, and return the ones that survive the junk filter.
+ * capMessages bounds API calls: incremental passes a small cap, backfill a large one.
+ */
+async function fetchGmailMessages(
+  accessToken: string,
+  sinceEpoch: number,
+  capMessages: number,
+  owner: string,
+): Promise<RawTouchpoint[]> {
   const out: RawTouchpoint[] = [];
-  for (const id of ids) {
-    const m = await gapi(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata` +
-        `&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject` +
-        `&metadataHeaders=List-Unsubscribe&metadataHeaders=List-Id&metadataHeaders=Precedence`,
+  const q = encodeURIComponent(`after:${sinceEpoch} ${GMAIL_QUERY_FILTER}`);
+  let pageToken: string | undefined;
+  let fetched = 0;
+  do {
+    const pageSize = Math.min(100, capMessages - fetched);
+    if (pageSize <= 0) break;
+    const list = await gapi(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${pageSize}&q=${q}` +
+        (pageToken ? `&pageToken=${pageToken}` : ""),
       accessToken,
     );
-    const headers: Record<string, string> = Object.fromEntries(
-      (m.payload?.headers ?? []).map((h: any) => [String(h.name).toLowerCase(), h.value]),
-    );
-    // Bulk/automated mail carries list headers or a bulk Precedence — skip it
-    // even if it slipped past the category filter (mailing lists, transactional).
-    const precedence = (headers["precedence"] ?? "").toLowerCase();
-    if (headers["list-unsubscribe"] || headers["list-id"] || ["bulk", "list", "junk"].includes(precedence)) {
-      continue;
+    for (const msg of (list.messages ?? []) as { id: string }[]) {
+      const m = await gapi(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=metadata${GMAIL_META_HEADERS}`,
+        accessToken,
+      );
+      fetched++;
+      const tp = gmailToTouchpoint(m, owner);
+      if (tp) out.push(tp);
     }
-    const owner = account.external_account_id.toLowerCase();
-    const from = parseAddresses(headers.from);
-    const ownerIsSender = from.some((a) => a.email === owner);
-    const participants = toParticipants(
-      owner,
-      ...from,
-      ...parseAddresses(headers.to),
-      ...parseAddresses(headers.cc),
-    ).filter((p) => !isRoleAddress(p.value));
-    // No human counterpart left (e.g. from a no-reply) — not a relationship touchpoint.
-    if (participants.length === 0) continue;
-    out.push({
-      externalId: id,
-      source: "gmail",
-      direction: ownerIsSender ? "out" : "in",
-      occurredAt: new Date(Number(m.internalDate)).toISOString(),
-      summary: headers.subject ?? "(no subject)",
-      participants,
-    });
-  }
+    pageToken = list.nextPageToken;
+  } while (pageToken && fetched < capMessages);
   return out;
 }
 
-async function fetchCalendar(account: Account, accessToken: string): Promise<RawTouchpoint[]> {
-  const params = new URLSearchParams({ singleEvents: "true", orderBy: "updated", maxResults: "25" });
+/** Convert one calendar event to a touchpoint, or null if solo/cancelled. */
+function calendarEventToTouchpoint(ev: any, owner: string): RawTouchpoint | null {
+  const when: string | undefined = ev.start?.dateTime ?? ev.start?.date;
+  if (!when || ev.status === "cancelled") return null;
+  const attendees: ParsedAddress[] = (ev.attendees ?? []).map((a: any) => ({
+    email: String(a.email ?? "").toLowerCase(),
+    name: a.displayName || undefined,
+  }));
+  if (ev.organizer?.email) {
+    attendees.push({ email: String(ev.organizer.email).toLowerCase(), name: ev.organizer.displayName || undefined });
+  }
+  const participants = toParticipants(owner, ...attendees).filter((p) => !isRoleAddress(p.value));
+  if (participants.length === 0) return null;
+  return {
+    externalId: ev.id,
+    source: "gcal",
+    direction: "mutual",
+    occurredAt: new Date(when).toISOString(),
+    summary: ev.summary ?? "(untitled event)",
+    participants,
+  };
+}
+
+/** Incremental calendar poll — delta by updatedMin (cursor), single page. */
+async function fetchCalendarIncremental(account: Account, accessToken: string): Promise<RawTouchpoint[]> {
+  const params = new URLSearchParams({ singleEvents: "true", orderBy: "updated", maxResults: String(INCREMENTAL_MAX) });
   if (account.last_cursor) params.set("updatedMin", account.last_cursor);
   else params.set("timeMin", new Date(Date.now() - DEFAULT_LOOKBACK_S * 1000).toISOString());
   const res = await gapi(
@@ -184,42 +231,54 @@ async function fetchCalendar(account: Account, accessToken: string): Promise<Raw
     accessToken,
   );
   const owner = account.external_account_id.toLowerCase();
+  return (res.items ?? [])
+    .map((ev: any) => calendarEventToTouchpoint(ev, owner))
+    .filter((tp: RawTouchpoint | null): tp is RawTouchpoint => tp !== null);
+}
+
+/** Paginate calendar events by start time from `timeMinIso`, up to `capEvents`. */
+async function fetchCalendarSince(
+  accessToken: string,
+  timeMinIso: string,
+  capEvents: number,
+  owner: string,
+): Promise<RawTouchpoint[]> {
   const out: RawTouchpoint[] = [];
-  for (const ev of res.items ?? []) {
-    const when: string | undefined = ev.start?.dateTime ?? ev.start?.date;
-    if (!when || ev.status === "cancelled") continue;
-    // Attendees + the organizer, each with its display name when present.
-    const attendees: ParsedAddress[] = (ev.attendees ?? []).map((a: any) => ({
-      email: String(a.email ?? "").toLowerCase(),
-      name: a.displayName || undefined,
-    }));
-    if (ev.organizer?.email) {
-      attendees.push({
-        email: String(ev.organizer.email).toLowerCase(),
-        name: ev.organizer.displayName || undefined,
-      });
-    }
-    const participants = toParticipants(owner, ...attendees).filter((p) => !isRoleAddress(p.value));
-    // Solo events (holidays, self-blocks) and room/no-reply invites have no human
-    // counterpart — skip so they don't clutter the timeline.
-    if (participants.length === 0) continue;
-    out.push({
-      externalId: ev.id,
-      source: "gcal",
-      direction: "mutual",
-      occurredAt: new Date(when).toISOString(),
-      summary: ev.summary ?? "(untitled event)",
-      participants,
+  let pageToken: string | undefined;
+  let fetched = 0;
+  do {
+    const params = new URLSearchParams({
+      singleEvents: "true",
+      orderBy: "startTime",
+      maxResults: String(Math.min(250, capEvents - fetched)),
+      timeMin: timeMinIso,
     });
-  }
+    if (pageToken) params.set("pageToken", pageToken);
+    const res = await gapi(
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params.toString()}`,
+      accessToken,
+    );
+    for (const ev of res.items ?? []) {
+      fetched++;
+      const tp = calendarEventToTouchpoint(ev, owner);
+      if (tp) out.push(tp);
+    }
+    pageToken = res.nextPageToken;
+  } while (pageToken && fetched < capEvents);
   return out;
 }
 
 async function fetchTouchpoints(account: Account): Promise<RawTouchpoint[]> {
   const accessToken = await freshAccessToken(account);
   if (!accessToken) return [];
-  if (account.provider === "gmail") return fetchGmail(account, accessToken);
-  if (account.provider === "gcal") return fetchCalendar(account, accessToken);
+  const owner = account.external_account_id.toLowerCase();
+  if (account.provider === "gmail") {
+    const since = account.last_cursor
+      ? Number(account.last_cursor)
+      : Math.floor(Date.now() / 1000) - DEFAULT_LOOKBACK_S;
+    return fetchGmailMessages(accessToken, since, INCREMENTAL_MAX, owner);
+  }
+  if (account.provider === "gcal") return fetchCalendarIncremental(account, accessToken);
   log.warn("no fetcher for provider", { provider: account.provider });
   return [];
 }
@@ -340,6 +399,49 @@ export async function runIngestion(): Promise<IngestSummary> {
     }
   }
   return { accounts: accounts.length, ingested, failed };
+}
+
+/**
+ * One-shot historical backfill: pull a deep time window (config.backfill.days)
+ * with pagination and the same junk filters, so past relationships populate.
+ * Idempotent (interactions upsert on external_id), so it's safe to re-run and
+ * it doesn't disturb the incremental cursor — routine polling continues from
+ * wherever it was. Sequential per-message fetches mean a large window can take
+ * a few minutes.
+ */
+export async function runBackfill(): Promise<void> {
+  const db = serviceClient();
+  const days = Math.max(1, config.backfill.days || 180);
+  const cap = Math.max(1, config.backfill.maxPerSource || 2000);
+  const sinceEpoch = Math.floor(Date.now() / 1000) - days * 86_400;
+  const sinceIso = new Date(Date.now() - days * 86_400_000).toISOString();
+
+  const { data: accounts, error } = await db
+    .from("account")
+    .select("id, owner_id, provider, external_account_id, last_cursor")
+    .eq("status", "active");
+  if (error) throw error;
+  if (!accounts || accounts.length === 0) {
+    log.info("backfill: no active accounts");
+    return;
+  }
+
+  log.info("backfill starting", { days, maxPerSource: cap });
+  for (const account of accounts as Account[]) {
+    try {
+      const token = await freshAccessToken(account);
+      if (!token) continue;
+      const owner = account.external_account_id.toLowerCase();
+      let tps: RawTouchpoint[] = [];
+      if (account.provider === "gmail") tps = await fetchGmailMessages(token, sinceEpoch, cap, owner);
+      else if (account.provider === "gcal") tps = await fetchCalendarSince(token, sinceIso, cap, owner);
+      for (const tp of tps) await persistTouchpoint(account.owner_id, tp);
+      log.info("backfill ingested", { account: account.id, provider: account.provider, count: tps.length });
+    } catch (err) {
+      log.error("backfill failed for account", { account: account.id, message: (err as Error).message });
+    }
+  }
+  log.info("backfill done", { days });
 }
 
 /**
