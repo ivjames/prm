@@ -5,6 +5,7 @@ import { logger } from "./lib/logger";
 import { healthRouter } from "./api/health";
 import { peopleRouter } from "./api/people";
 import { sessionRouter } from "./api/session";
+import { connectRouter } from "./api/connect";
 
 const log = logger("web");
 
@@ -19,6 +20,7 @@ function buildApp() {
   // API surface.
   app.use("/api", healthRouter);
   app.use("/api/auth", sessionRouter);
+  app.use("/api/connect", connectRouter);
   app.use("/api/people", peopleRouter);
 
   // Expose the public (client-safe) Supabase config so the static web client

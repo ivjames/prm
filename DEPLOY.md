@@ -91,16 +91,29 @@ prm backup     # snapshot .env + public schema into data/backups/
 
 ## Connecting a data source (Gmail / Calendar)
 
-Login OAuth is handled by Supabase Auth. **Data-access** OAuth (the background
-read token) is separate and not yet wired — the ingestion worker's provider
-fetch is a stub (`src/workers/ingest.ts`) until:
+Login OAuth (Sign in with Google) is Supabase Auth. **Data-access** OAuth — the
+background read token the ingestion worker uses — is separate and wired through
+`/api/connect/google` → Google consent → `/api/connect/google/callback`, which
+exchanges the code, stores the refresh token encrypted via `store_account_token`
+(the vault), and creates `account` rows for `gmail` + `gcal`.
 
-1. Google OAuth app + restricted Gmail/Calendar scopes are configured
-   (`GOOGLE_OAUTH_CLIENT_ID/SECRET`).
-2. The consent → token exchange → `store_account_token()` vault write path is
-   built, creating an `account` row and stashing its refresh token.
+One-time Google Cloud setup:
 
-Once an active `account` row with a stored token exists, the ingestion pipeline
-(entity resolution → interactions → cadence reset) runs end to end on the
-`INGEST_CRON` schedule. Restricted Google scopes need a CASA assessment before
-any non-personal use — plan lead time (see `docs/architecture.md`).
+1. In a Google Cloud project, enable the **Gmail API** and **Calendar API**.
+2. Configure the OAuth **consent screen**; add the scopes
+   `gmail.readonly` and `calendar.readonly` (both *restricted* — a CASA
+   assessment is required before any non-personal/public use; fine for personal
+   use with the owner added as a test user).
+3. Create an **OAuth 2.0 Client ID** (type: Web application) with the authorized
+   redirect URI `https://prm.lab980.com/api/connect/google/callback`.
+4. Put the client id/secret in `.env` as `GOOGLE_OAUTH_CLIENT_ID` /
+   `GOOGLE_OAUTH_CLIENT_SECRET`, then `prm restart`.
+
+Then: sign in, click **Connect Gmail & Calendar** (or hit `/api/connect/google`),
+grant consent. From then on `prm-worker` polls on `INGEST_CRON` and the pipeline
+runs end to end — entity resolution → interactions → cadence reset. `readyz`
+stays green regardless; check `prm logs` for `ingested touchpoints`.
+
+> Note: the consent uses `access_type=offline` + `prompt=consent` to guarantee a
+> refresh token. If a stale prior grant means Google returns none, revoke the
+> app at myaccount.google.com → Security → third-party access, and reconnect.
