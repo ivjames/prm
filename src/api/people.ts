@@ -1,5 +1,6 @@
 import { Router, Response } from "express";
 import { AuthedRequest, requireUser } from "./auth";
+import { aiConfigured, summarizeRelationship } from "../lib/anthropic";
 
 /**
  * People + their timeline. Everything goes through req.db (RLS-scoped to the
@@ -29,7 +30,7 @@ peopleRouter.get("/:id", async (req: AuthedRequest, res: Response, next) => {
     const { id } = req.params;
     const { data: person, error: pErr } = await req
       .db!.from("person")
-      .select("id, name, tags, notes, details")
+      .select("id, name, tags, notes, details, summary, cadence(interval_days, next_due, last_contact)")
       .eq("id", id)
       .single();
     if (pErr) throw pErr;
@@ -65,6 +66,112 @@ peopleRouter.post("/", async (req: AuthedRequest, res: Response, next) => {
       .single();
     if (error) throw error;
     res.status(201).json({ person: data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PUT /api/people/:id/cadence { interval_days } — set/change how often to keep
+// in touch. Seeds last_contact from the most recent interaction and computes
+// next_due right away so the overdue/soon badge reflects it without waiting for
+// the hourly cadence cron. RLS scopes everything to the caller.
+peopleRouter.put("/:id/cadence", async (req: AuthedRequest, res: Response, next) => {
+  try {
+    const { id } = req.params;
+    const interval = Number(req.body?.interval_days);
+    if (!Number.isInteger(interval) || interval <= 0) {
+      return res.status(400).json({ error: "interval_days must be a positive integer" });
+    }
+
+    // Confirm the person is the caller's (RLS would also block, but 404 is clearer).
+    const { data: person, error: pErr } = await req.db!.from("person").select("id").eq("id", id).maybeSingle();
+    if (pErr) throw pErr;
+    if (!person) return res.status(404).json({ error: "person not found" });
+
+    // Most recent touchpoint seeds the cadence clock.
+    const { data: last, error: lErr } = await req
+      .db!.from("interaction")
+      .select("occurred_at, interaction_person!inner(person_id)")
+      .eq("interaction_person.person_id", id)
+      .order("occurred_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (lErr) throw lErr;
+
+    const lastContact: string | null = last?.occurred_at ?? null;
+    const base = lastContact ? new Date(lastContact).getTime() : Date.now();
+    const nextDue = new Date(base + interval * 86_400_000).toISOString();
+
+    const { data, error } = await req
+      .db!.from("cadence")
+      .upsert(
+        { person_id: id, interval_days: interval, last_contact: lastContact, next_due: nextDue },
+        { onConflict: "person_id" },
+      )
+      .select("interval_days, next_due, last_contact")
+      .single();
+    if (error) throw error;
+    res.json({ cadence: data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/people/:id/cadence — stop tracking a contact's cadence.
+peopleRouter.delete("/:id/cadence", async (req: AuthedRequest, res: Response, next) => {
+  try {
+    const { id } = req.params;
+    const { error } = await req.db!.from("cadence").delete().eq("person_id", id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/people/:id/summarize — (re)generate the cached Haiku relationship
+// summary from this contact's interaction metadata. Explicit user action so
+// there's no surprise API cost; the result is cached on the person row and the
+// GET endpoint serves it without re-calling the model (summarize once, cache).
+peopleRouter.post("/:id/summarize", async (req: AuthedRequest, res: Response, next) => {
+  try {
+    if (!aiConfigured()) {
+      return res.status(503).json({ error: "AI summarization not configured (set ANTHROPIC_API_KEY)" });
+    }
+    const { id } = req.params;
+    const { data: person, error: pErr } = await req
+      .db!.from("person")
+      .select("id, name")
+      .eq("id", id)
+      .maybeSingle();
+    if (pErr) throw pErr;
+    if (!person) return res.status(404).json({ error: "person not found" });
+
+    const { data: rows, error: rErr } = await req
+      .db!.from("interaction")
+      .select("source, direction, occurred_at, summary, interaction_person!inner(person_id)")
+      .eq("interaction_person.person_id", id)
+      .order("occurred_at", { ascending: false })
+      .limit(40);
+    if (rErr) throw rErr;
+    if (!rows || rows.length === 0) {
+      return res.status(400).json({ error: "no interactions to summarize yet" });
+    }
+
+    const summary = await summarizeRelationship(person.name as string, rows as any);
+
+    const { data, error } = await req
+      .db!.from("person")
+      .update({
+        summary,
+        summary_updated_at: new Date().toISOString(),
+        summary_basis: rows.length,
+      })
+      .eq("id", id)
+      .select("summary, summary_updated_at, summary_basis")
+      .single();
+    if (error) throw error;
+    res.json(data);
   } catch (err) {
     next(err);
   }

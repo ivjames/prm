@@ -32,6 +32,8 @@ export const config = {
   },
 
   anthropicApiKey: optional("ANTHROPIC_API_KEY"),
+  // Haiku-tier for extraction/summarization (architecture.md). Overridable via env.
+  anthropicModel: optional("ANTHROPIC_MODEL", "claude-haiku-4-5"),
   deepgramApiKey: optional("DEEPGRAM_API_KEY"),
 
   google: {

@@ -101,6 +101,17 @@
       .tags { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0.4rem 0 0.9rem; }
       .chip { font-size: 0.72rem; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0.1rem 0.5rem; }
       .notes { color: var(--muted); font-size: 0.9rem; margin: 0 0 1.1rem; white-space: pre-wrap; }
+      .summary { padding: 0.7rem 0.8rem; margin: 0 0 0.9rem; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+      .sum-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+      .sum-head .btn-sm { margin: 0; }
+      .sum-text { margin: 0.5rem 0 0; font-size: 0.92rem; }
+      .sum-empty { margin: 0.5rem 0 0; font-size: 0.85rem; color: var(--dim); }
+      .cadence { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; padding: 0.7rem 0.8rem; margin: 0 0 1.1rem; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+      .cad-label { font-size: 0.85rem; font-weight: 600; }
+      .cadence select { padding: 0.35rem 0.5rem; border-radius: 7px; border: 1px solid var(--border); background: var(--bg); }
+      .cadence select:focus { outline: none; border-color: var(--accent); }
+      .cad-status { font-size: 0.8rem; color: var(--muted); }
+      .cad-next { color: var(--muted); }
       .tl-head { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--dim); margin: 0 0 0.5rem; }
       .tl { list-style: none; margin: 0; padding: 0; }
       .tl li { display: flex; gap: 0.7rem; padding: 0.55rem 0; border-bottom: 1px solid var(--border); }
@@ -297,8 +308,84 @@
           <h2>${esc(person.name)}</h2>
           ${tags ? `<div class="tags">${tags}</div>` : ""}
           ${person.notes ? `<p class="notes">${esc(person.notes)}</p>` : ""}
+          ${renderSummary(person)}
+          ${renderCadence(person)}
           <div class="tl-head">Timeline${timeline.length ? ` · ${timeline.length}` : ""}</div>
           <ul class="tl">${items}</ul>`;
+      }
+
+      // ---- AI summary ----
+      function renderSummary(person) {
+        const has = person.summary && String(person.summary).trim();
+        const stale = has && person.summary_basis != null && person.summary_basis < 40; // hint only
+        return `<div class="summary">
+          <div class="sum-head">
+            <span class="tl-head" style="margin:0">Summary</span>
+            <button class="btn btn-ghost btn-sm" id="sum-btn" data-pid="${esc(person.id)}">${has ? "Refresh" : "Summarize"}</button>
+          </div>
+          ${
+            has
+              ? `<p class="sum-text">${esc(person.summary)}</p>`
+              : `<p class="sum-empty">Generate a one-line read on this relationship from its timeline (Haiku).</p>`
+          }
+        </div>`;
+      }
+      async function summarize(pid, btn) {
+        btn.disabled = true;
+        btn.textContent = "Summarizing…";
+        try {
+          await api(`/api/people/${encodeURIComponent(pid)}/summarize`, { method: "POST" });
+          await selectPerson(pid);
+        } catch (e) {
+          btn.disabled = false;
+          btn.textContent = "Summarize";
+          alert("Couldn't summarize: " + (e.message || "error"));
+        }
+      }
+
+      // ---- cadence ----
+      const CADENCE_OPTIONS = [
+        { v: "", label: "Off" },
+        { v: 7, label: "Weekly" },
+        { v: 14, label: "Every 2 weeks" },
+        { v: 30, label: "Monthly" },
+        { v: 90, label: "Quarterly" },
+      ];
+      function cadenceOf(person) {
+        const c = person.cadence;
+        return (Array.isArray(c) ? c[0] : c) || null;
+      }
+      function cadenceStatus(cad) {
+        if (!cad || !cad.next_due) return "";
+        const due = new Date(cad.next_due);
+        const days = Math.round((due - Date.now()) / 86400000);
+        if (days < 0) return `<span class="badge overdue">overdue ${-days}d</span>`;
+        if (days === 0) return `<span class="badge due">due today</span>`;
+        return `<span class="cad-next">next due in ${days}d · ${esc(fmtDate(cad.next_due))}</span>`;
+      }
+      function renderCadence(person) {
+        const cad = cadenceOf(person);
+        const cur = cad ? cad.interval_days : "";
+        const opts = CADENCE_OPTIONS.map(
+          (o) => `<option value="${o.v}" ${String(o.v) === String(cur) ? "selected" : ""}>${o.label}</option>`,
+        ).join("");
+        return `<div class="cadence">
+          <span class="cad-label">Keep in touch</span>
+          <select id="cad-select" data-pid="${esc(person.id)}">${opts}</select>
+          <span class="cad-status">${cadenceStatus(cad)}</span>
+        </div>`;
+      }
+      async function setCadence(pid, value) {
+        if (value === "") {
+          await api(`/api/people/${encodeURIComponent(pid)}/cadence`, { method: "DELETE" });
+        } else {
+          await api(`/api/people/${encodeURIComponent(pid)}/cadence`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ interval_days: Number(value) }),
+          });
+        }
+        await Promise.all([selectPerson(pid), loadPeople()]); // refresh detail + list badges
       }
 
       // ---- add contact ----
@@ -383,6 +470,20 @@
           renderPeople();
           $("detail").classList.add("detail-hidden-mobile");
           $("detail").innerHTML = `<div class="empty">Select a contact to see their timeline.</div>`;
+        }
+      });
+      $("detail").addEventListener("click", (e) => {
+        const b = e.target.closest("#sum-btn");
+        if (b) summarize(b.dataset.pid, b);
+      });
+      $("detail").addEventListener("change", (e) => {
+        const sel = e.target.closest("#cad-select");
+        if (sel) {
+          sel.disabled = true;
+          setCadence(sel.dataset.pid, sel.value).catch((err) => {
+            sel.disabled = false;
+            alert("Couldn't update cadence: " + (err.message || "error"));
+          });
         }
       });
       $("add-btn").addEventListener("click", () => openModal(true));
