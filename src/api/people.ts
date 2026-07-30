@@ -10,13 +10,17 @@ export const peopleRouter = Router();
 
 peopleRouter.use(requireUser);
 
-// GET /api/people — list the caller's contacts, most-overdue first.
+// GET /api/people — list the caller's contacts. Active only by default;
+// ?archived=1 returns the archived (hidden) ones so they can be reviewed/restored.
 peopleRouter.get("/", async (req: AuthedRequest, res: Response, next) => {
   try {
-    const { data, error } = await req
+    const archived = req.query.archived === "1";
+    let q = req
       .db!.from("person")
       .select("id, name, tags, next_due:cadence(next_due)")
       .order("name", { ascending: true });
+    q = archived ? q.not("archived_at", "is", null) : q.is("archived_at", null);
+    const { data, error } = await q;
     if (error) throw error;
     res.json({ people: data ?? [] });
   } catch (err) {
@@ -30,7 +34,7 @@ peopleRouter.get("/:id", async (req: AuthedRequest, res: Response, next) => {
     const { id } = req.params;
     const { data: person, error: pErr } = await req
       .db!.from("person")
-      .select("id, name, tags, notes, details, summary, cadence(interval_days, next_due, last_contact)")
+      .select("id, name, tags, notes, details, summary, archived_at, cadence(interval_days, next_due, last_contact)")
       .eq("id", id)
       .single();
     if (pErr) throw pErr;
@@ -122,6 +126,31 @@ peopleRouter.delete("/:id/cadence", async (req: AuthedRequest, res: Response, ne
   try {
     const { id } = req.params;
     const { error } = await req.db!.from("cadence").delete().eq("person_id", id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/people/:id/archive — hide a contact (reversible). POST .../unarchive
+// restores it. Junk that slipped in can be tucked away without losing history.
+peopleRouter.post("/:id/archive", async (req: AuthedRequest, res: Response, next) => {
+  try {
+    const { error } = await req
+      .db!.from("person")
+      .update({ archived_at: new Date().toISOString() })
+      .eq("id", req.params.id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+peopleRouter.post("/:id/unarchive", async (req: AuthedRequest, res: Response, next) => {
+  try {
+    const { error } = await req.db!.from("person").update({ archived_at: null }).eq("id", req.params.id);
     if (error) throw error;
     res.json({ ok: true });
   } catch (err) {
