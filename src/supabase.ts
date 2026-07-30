@@ -1,4 +1,6 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { createServerClient, parseCookieHeader, serializeCookieHeader } from "@supabase/ssr";
+import type { Request, Response } from "express";
 import { config } from "./config";
 
 /**
@@ -43,5 +45,38 @@ export function forUser(accessToken: string): SupabaseClient {
   return createClient(config.supabase.url, config.supabase.anonKey, {
     auth: { persistSession: false, autoRefreshToken: false },
     global: { headers: { Authorization: `Bearer ${accessToken}` } },
+  });
+}
+
+/**
+ * Cookie-based server session client (@supabase/ssr). The session lives in
+ * httpOnly cookies that this client reads off the request and writes back onto
+ * the response — including silent token refreshes. Like forUser(), it's bound
+ * to one end-user and RLS applies, so it's the right client for authed request
+ * handlers when the browser holds its session in cookies rather than sending a
+ * bearer token.
+ *
+ * Must be created per-request (it closes over req/res). Any auth call that
+ * rotates the session (sign-in, refresh, sign-out) appends Set-Cookie via the
+ * adapter below, so call these before the response is sent.
+ */
+export function serverClient(req: Request, res: Response): SupabaseClient {
+  if (!config.supabase.url || !config.supabase.anonKey) {
+    throw new Error("serverClient() requires SUPABASE_URL and SUPABASE_ANON_KEY");
+  }
+  return createServerClient(config.supabase.url, config.supabase.anonKey, {
+    cookies: {
+      getAll() {
+        return parseCookieHeader(req.headers.cookie ?? "").map(({ name, value }) => ({
+          name,
+          value: value ?? "",
+        }));
+      },
+      setAll(cookiesToSet) {
+        for (const { name, value, options } of cookiesToSet) {
+          res.append("Set-Cookie", serializeCookieHeader(name, value, options));
+        }
+      },
+    },
   });
 }

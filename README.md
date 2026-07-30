@@ -23,7 +23,8 @@ Supabase (Postgres + Auth + RLS) · Capacitor (web/iOS/Android, one codebase) ·
 ```
 src/
   server.ts            web PWA + API (binds PORT; the process nginx proxies to)
-  api/                 health, auth (Supabase JWT), people/timeline routes
+  api/                 health, auth (cookie session via @supabase/ssr,
+                       bearer-token fallback), session endpoints, people routes
   workers/             prm-worker: ingestion + cadence schedulers
     entity-resolution  handle -> canonical Person (the differentiating core)
 supabase/migrations/   0001 schema · 0002 RLS · 0003 token vault · 0004 cadence
@@ -31,6 +32,20 @@ web/                   static PWA shell (placeholder for the Capacitor build)
 ecosystem.config.cjs   pm2: prm-web + prm-worker
 bin/prm                operate CLI (deploy/restart/logs/migrate/backup)
 ```
+
+## Auth
+
+Cookie-based server sessions via `@supabase/ssr`: the session lives in httpOnly
+cookies the server reads/writes per request (RLS still enforces per-user
+isolation). Endpoints under `/api/auth`:
+
+- `POST /api/auth/signin` `{email, password}` — password sign-in; sets cookies.
+- `GET  /api/auth/callback?code=…&next=/` — OAuth (e.g. Google) code exchange.
+- `POST /api/auth/signout` — clears the session.
+- `GET  /api/auth/me` — current user, or 401.
+
+`requireUser` accepts the cookie session first and falls back to an
+`Authorization: Bearer <jwt>` header for non-browser API callers.
 
 ## Develop locally
 
