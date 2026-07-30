@@ -65,10 +65,58 @@ async function gapi(url: string, accessToken: string): Promise<any> {
   return res.json();
 }
 
-function extractEmails(...headerValues: (string | undefined)[]): string[] {
-  const joined = headerValues.filter(Boolean).join(",");
-  const matches = joined.match(/[^\s<>,;"]+@[^\s<>,;"]+/g) ?? [];
-  return [...new Set(matches.map((e) => e.toLowerCase()))];
+interface ParsedAddress {
+  email: string;
+  name?: string;
+}
+
+/**
+ * Parse an RFC-5322 address-list header (From/To/Cc) into { email, name } pairs,
+ * keeping the display name so contacts get a real name instead of just an email.
+ * Handles `"Doe, Jane" <jane@x>`, `Jane Doe <jane@x>`, and bare `bob@x`.
+ */
+function parseAddresses(headerValue?: string): ParsedAddress[] {
+  if (!headerValue) return [];
+  const out: ParsedAddress[] = [];
+  const seen = new Set<string>();
+  // Named forms: optional "quoted" or unquoted display name, then <email>.
+  const named = /(?:"([^"]*)"|([^,<]*))?\s*<\s*([^<>@\s]+@[^<>\s]+?)\s*>/g;
+  let m: RegExpExecArray | null;
+  while ((m = named.exec(headerValue))) {
+    const email = m[3].trim().toLowerCase();
+    const name = (m[1] ?? m[2] ?? "").trim().replace(/^['"]+|['"]+$/g, "").trim();
+    if (!seen.has(email)) {
+      seen.add(email);
+      out.push({ email, name: name || undefined });
+    }
+  }
+  // Bare emails with no angle brackets (deduped against the named ones above).
+  for (const bare of headerValue.match(/[^\s<>,;"]+@[^\s<>,;"]+/g) ?? []) {
+    const email = bare.toLowerCase();
+    if (!seen.has(email)) {
+      seen.add(email);
+      out.push({ email });
+    }
+  }
+  return out;
+}
+
+/**
+ * Collapse address entries from several headers into one participant list,
+ * excluding the owner and preferring an entry that carries a display name.
+ */
+function toParticipants(owner: string, ...addrs: ParsedAddress[]): RawTouchpoint["participants"] {
+  const byEmail = new Map<string, ParsedAddress>();
+  for (const a of addrs) {
+    if (!a.email || a.email === owner) continue;
+    const prev = byEmail.get(a.email);
+    if (!prev || (!prev.name && a.name)) byEmail.set(a.email, a);
+  }
+  return [...byEmail.values()].map((a) => ({
+    type: "email" as IdentifierType,
+    value: a.email,
+    displayName: a.name,
+  }));
 }
 
 const DEFAULT_LOOKBACK_S = 7 * 24 * 3600;
@@ -95,10 +143,14 @@ async function fetchGmail(account: Account, accessToken: string): Promise<RawTou
       (m.payload?.headers ?? []).map((h: any) => [String(h.name).toLowerCase(), h.value]),
     );
     const owner = account.external_account_id.toLowerCase();
-    const ownerIsSender = extractEmails(headers.from).includes(owner);
-    const participants = extractEmails(headers.from, headers.to, headers.cc)
-      .filter((e) => e !== owner)
-      .map((value) => ({ type: "email" as IdentifierType, value }));
+    const from = parseAddresses(headers.from);
+    const ownerIsSender = from.some((a) => a.email === owner);
+    const participants = toParticipants(
+      owner,
+      ...from,
+      ...parseAddresses(headers.to),
+      ...parseAddresses(headers.cc),
+    );
     out.push({
       externalId: id,
       source: "gmail",
@@ -124,10 +176,18 @@ async function fetchCalendar(account: Account, accessToken: string): Promise<Raw
   for (const ev of res.items ?? []) {
     const when: string | undefined = ev.start?.dateTime ?? ev.start?.date;
     if (!when || ev.status === "cancelled") continue;
-    const participants = (ev.attendees ?? [])
-      .map((a: any) => String(a.email ?? "").toLowerCase())
-      .filter((e: string) => e && e !== owner)
-      .map((value: string) => ({ type: "email" as IdentifierType, value }));
+    // Attendees + the organizer, each with its display name when present.
+    const attendees: ParsedAddress[] = (ev.attendees ?? []).map((a: any) => ({
+      email: String(a.email ?? "").toLowerCase(),
+      name: a.displayName || undefined,
+    }));
+    if (ev.organizer?.email) {
+      attendees.push({
+        email: String(ev.organizer.email).toLowerCase(),
+        name: ev.organizer.displayName || undefined,
+      });
+    }
+    const participants = toParticipants(owner, ...attendees);
     out.push({
       externalId: ev.id,
       source: "gcal",

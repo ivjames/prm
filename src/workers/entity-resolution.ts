@@ -41,7 +41,18 @@ export async function resolvePerson(
     .eq("value", value)
     .maybeSingle();
   if (findErr) throw findErr;
-  if (existing?.person_id) return existing.person_id as string;
+  if (existing?.person_id) {
+    const pid = existing.person_id as string;
+    // Backfill a real name onto a contact still named by their raw identifier
+    // (early ingests had no display name). Never overwrites a proper name.
+    if (opts.displayName && opts.displayName !== value) {
+      const { data: p } = await db.from("person").select("name").eq("id", pid).single();
+      if (p && typeof p.name === "string" && p.name.toLowerCase() === value.toLowerCase()) {
+        await db.from("person").update({ name: opts.displayName }).eq("id", pid);
+      }
+    }
+    return pid;
+  }
 
   // 2. No match — create the canonical Person, then attach the identifier.
   const { data: person, error: pErr } = await db
