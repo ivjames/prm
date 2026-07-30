@@ -97,6 +97,9 @@
 
       /* detail / timeline */
       .detail { overflow-y: auto; padding: 1.1rem 1.25rem; }
+      .detail-top { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
+      #arch-btn { margin-left: auto; }
+      #arch-toggle.active-toggle { background: var(--accent); color: var(--bg); border-color: var(--accent); }
       .detail h2 { margin: 0 0 0.2rem; font-size: 1.3rem; }
       .tags { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0.4rem 0 0.9rem; }
       .chip { font-size: 0.72rem; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0.1rem 0.5rem; }
@@ -164,6 +167,7 @@
         <div class="list" id="list-col">
           <div class="list-tools">
             <input id="search" type="search" placeholder="Search contacts…" autocomplete="off" />
+            <button class="btn btn-ghost btn-sm" id="arch-toggle" title="Show archived contacts">Archived</button>
             <button class="btn btn-primary btn-sm" id="add-btn">+ Add</button>
           </div>
           <div class="people" id="people"></div>
@@ -209,7 +213,7 @@
         return r.json();
       }
 
-      const state = { people: [], selectedId: null, filter: "" };
+      const state = { people: [], selectedId: null, filter: "", viewArchived: false };
 
       // ---- source / direction glyphs ----
       const SRC = { gmail: "✉️", gcal: "📅", graph: "✉️", manual: "✍️", voice: "🎙️" };
@@ -239,7 +243,7 @@
       // ---- people list ----
       async function loadPeople() {
         try {
-          const { people } = await api("/api/people");
+          const { people } = await api(`/api/people${state.viewArchived ? "?archived=1" : ""}`);
           state.people = people || [];
           renderPeople();
         } catch (e) {
@@ -250,11 +254,12 @@
         const q = state.filter.trim().toLowerCase();
         const rows = state.people.filter((p) => !q || (p.name || "").toLowerCase().includes(q));
         if (rows.length === 0) {
-          $("people").innerHTML = `<div class="empty">${
-            state.people.length === 0
+          const emptyMsg = state.viewArchived
+            ? "No archived contacts."
+            : state.people.length === 0
               ? "No contacts yet. They appear automatically as email &amp; calendar activity is ingested — or add one manually."
-              : "No matches."
-          }</div>`;
+              : "No matches.";
+          $("people").innerHTML = `<div class="empty">${emptyMsg}</div>`;
           return;
         }
         $("people").innerHTML = rows
@@ -303,8 +308,12 @@
               )
               .join("")
           : `<div class="empty">No interactions yet.</div>`;
+        const archived = !!person.archived_at;
         return `
-          <button class="btn btn-ghost btn-sm backlink" id="back-btn">← Contacts</button>
+          <div class="detail-top">
+            <button class="btn btn-ghost btn-sm backlink" id="back-btn">← Contacts</button>
+            <button class="btn btn-ghost btn-sm" id="arch-btn" data-pid="${esc(person.id)}" data-archived="${archived ? 1 : 0}">${archived ? "Unarchive" : "Archive"}</button>
+          </div>
           <h2>${esc(person.name)}</h2>
           ${tags ? `<div class="tags">${tags}</div>` : ""}
           ${person.notes ? `<p class="notes">${esc(person.notes)}</p>` : ""}
@@ -312,6 +321,27 @@
           ${renderCadence(person)}
           <div class="tl-head">Timeline${timeline.length ? ` · ${timeline.length}` : ""}</div>
           <ul class="tl">${items}</ul>`;
+      }
+
+      // ---- archive ----
+      function setArchivedView(on) {
+        state.viewArchived = on;
+        state.selectedId = null;
+        const t = $("arch-toggle");
+        t.textContent = on ? "← Active" : "Archived";
+        t.classList.toggle("active-toggle", on);
+        $("detail").classList.add("detail-hidden-mobile");
+        $("detail").innerHTML = `<div class="empty">${on ? "Archived contacts — open one to restore it." : "Select a contact to see their timeline."}</div>`;
+        loadPeople();
+      }
+      async function toggleArchive(pid, isArchived) {
+        await api(`/api/people/${encodeURIComponent(pid)}/${isArchived ? "unarchive" : "archive"}`, {
+          method: "POST",
+        });
+        state.selectedId = null;
+        $("detail").classList.add("detail-hidden-mobile");
+        $("detail").innerHTML = `<div class="empty">Select a contact to see their timeline.</div>`;
+        await loadPeople();
       }
 
       // ---- AI summary ----
@@ -474,8 +504,17 @@
       });
       $("detail").addEventListener("click", (e) => {
         const b = e.target.closest("#sum-btn");
-        if (b) summarize(b.dataset.pid, b);
+        if (b) { summarize(b.dataset.pid, b); return; }
+        const a = e.target.closest("#arch-btn");
+        if (a) {
+          a.disabled = true;
+          toggleArchive(a.dataset.pid, a.dataset.archived === "1").catch((err) => {
+            a.disabled = false;
+            alert("Couldn't update: " + (err.message || "error"));
+          });
+        }
       });
+      $("arch-toggle").addEventListener("click", () => setArchivedView(!state.viewArchived));
       $("detail").addEventListener("change", (e) => {
         const sel = e.target.closest("#cad-select");
         if (sel) {

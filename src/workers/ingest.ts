@@ -341,3 +341,36 @@ export async function runIngestion(): Promise<IngestSummary> {
   }
   return { accounts: accounts.length, ingested, failed };
 }
+
+/**
+ * Bulk-archive contacts that are clearly automated/bulk senders — every one of
+ * their identifiers looks like a role address (no-reply, notifications,
+ * newsletters, receipts). Reversible: it sets archived_at, never deletes, and
+ * leaves manually-added contacts (which have no identifiers) untouched.
+ */
+export async function runCleanup(): Promise<void> {
+  const db = serviceClient();
+  const { data: people, error } = await db
+    .from("person")
+    .select("id, name, identifier(value)")
+    .is("archived_at", null);
+  if (error) throw error;
+
+  const junkIds = (people ?? [])
+    .filter((p: any) => {
+      const values: string[] = (p.identifier ?? []).map((i: any) => i.value);
+      return values.length > 0 && values.every((v) => isRoleAddress(v));
+    })
+    .map((p: any) => p.id as string);
+
+  if (junkIds.length === 0) {
+    log.info("cleanup: no junk contacts to archive");
+    return;
+  }
+  const { error: uErr } = await db
+    .from("person")
+    .update({ archived_at: new Date().toISOString() })
+    .in("id", junkIds);
+  if (uErr) throw uErr;
+  log.info("cleanup: archived junk contacts", { count: junkIds.length });
+}
