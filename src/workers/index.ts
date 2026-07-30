@@ -1,7 +1,7 @@
 import cron from "node-cron";
 import { config, requireFor } from "../config";
 import { logger } from "../lib/logger";
-import { runIngestion, runCleanup } from "./ingest";
+import { runIngestion, runCleanup, runBackfill } from "./ingest";
 import { runCadence } from "./cadence";
 
 const log = logger("worker");
@@ -47,6 +47,7 @@ const JOBS: Record<string, () => Promise<JobResult>> = {
   ingest: runIngestion,
   cadence: runCadence,
   cleanup: runCleanup,
+  backfill: runBackfill,
 };
 
 /**
