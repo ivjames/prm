@@ -8,6 +8,7 @@
     <title>PRM</title>
     <style>
       :root { color-scheme: light dark; }
+      * { box-sizing: border-box; }
       body {
         margin: 0;
         font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
@@ -17,41 +18,119 @@
         place-items: center;
         min-height: 100vh;
       }
-      main { max-width: 32rem; padding: 2rem; text-align: center; }
-      h1 { margin: 0 0 0.5rem; font-size: 1.75rem; }
-      p { color: #94a3b8; margin: 0.5rem 0; }
-      code { background: #1e293b; padding: 0.1rem 0.4rem; border-radius: 4px; }
-      .status { margin-top: 1.5rem; font-size: 0.9rem; }
+      main { width: min(28rem, 92vw); padding: 2rem; }
+      h1 { margin: 0 0 0.25rem; font-size: 1.75rem; }
+      .tag { color: #94a3b8; margin: 0 0 1.5rem; font-size: 0.95rem; }
+      .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 1.25rem; }
+      label { display: block; font-size: 0.8rem; color: #94a3b8; margin: 0.6rem 0 0.2rem; }
+      input {
+        width: 100%; padding: 0.55rem 0.7rem; border-radius: 8px;
+        border: 1px solid #334155; background: #0f172a; color: #e2e8f0; font: inherit;
+      }
+      button, .btn {
+        display: inline-block; width: 100%; margin-top: 0.9rem; padding: 0.6rem 0.9rem;
+        border: 0; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer;
+        text-align: center; text-decoration: none;
+      }
+      .btn-primary { background: #22c55e; color: #06210f; }
+      .btn-google { background: #e2e8f0; color: #0f172a; }
+      .btn-ghost { background: transparent; color: #94a3b8; border: 1px solid #334155; }
+      .sep { text-align: center; color: #64748b; font-size: 0.8rem; margin: 0.9rem 0; }
+      .msg { min-height: 1.2rem; margin-top: 0.6rem; font-size: 0.85rem; color: #f87171; }
+      .who { font-size: 1.05rem; }
+      .who b { color: #fff; }
+      .status { margin-top: 1.25rem; font-size: 0.85rem; color: #94a3b8; }
       .dot { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; background: #64748b; margin-right: 0.4rem; }
-      .dot.ok { background: #22c55e; }
-      .dot.down { background: #ef4444; }
+      .dot.ok { background: #22c55e; } .dot.down { background: #ef4444; }
+      .hidden { display: none; }
     </style>
   </head>
   <body>
     <main>
       <h1>PRM</h1>
-      <p>Personal relationship management. This is the web PWA shell served from the lab980 droplet; the Capacitor client build will replace it.</p>
+      <p class="tag">Personal relationship management — web shell on the lab980 droplet.</p>
+
+      <!-- signed-out -->
+      <section id="signin" class="card hidden">
+        <a class="btn btn-google" href="/api/auth/login/google">Sign in with Google</a>
+        <div class="sep">— or —</div>
+        <form id="pw-form">
+          <label for="email">Email</label>
+          <input id="email" type="email" autocomplete="username" required />
+          <label for="password">Password</label>
+          <input id="password" type="password" autocomplete="current-password" required />
+          <button class="btn-primary" type="submit">Sign in</button>
+        </form>
+        <div class="msg" id="signin-msg"></div>
+      </section>
+
+      <!-- signed-in -->
+      <section id="account" class="card hidden">
+        <p class="who">Signed in as <b id="who-email"></b></p>
+        <button class="btn-ghost" id="signout">Sign out</button>
+      </section>
+
       <p class="status"><span class="dot" id="dot"></span><span id="status">checking backend…</span></p>
     </main>
+
     <script>
-      // Smoke check: does the server see its Supabase backend?
+      const $ = (id) => document.getElementById(id);
+      const show = (el, on) => el.classList.toggle("hidden", !on);
+
+      async function refreshAuth() {
+        try {
+          const r = await fetch("/api/auth/me", { credentials: "same-origin" });
+          if (r.ok) {
+            const { user } = await r.json();
+            $("who-email").textContent = user?.email ?? user?.id ?? "(unknown)";
+            show($("account"), true);
+            show($("signin"), false);
+          } else {
+            show($("signin"), true);
+            show($("account"), false);
+          }
+        } catch {
+          show($("signin"), true);
+        }
+      }
+
+      $("pw-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        $("signin-msg").textContent = "";
+        const res = await fetch("/api/auth/signin", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ email: $("email").value, password: $("password").value }),
+        });
+        if (res.ok) {
+          refreshAuth();
+        } else {
+          const j = await res.json().catch(() => ({}));
+          $("signin-msg").textContent = j.error || "sign-in failed";
+        }
+      });
+
+      $("signout").addEventListener("click", async () => {
+        await fetch("/api/auth/signout", { method: "POST", credentials: "same-origin" });
+        refreshAuth();
+      });
+
+      // backend health indicator
       fetch("/api/readyz")
         .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
         .then(({ ok, j }) => {
-          const dot = document.getElementById("dot");
-          const status = document.getElementById("status");
-          if (ok && j.ok) {
-            dot.className = "dot ok";
-            status.textContent = "backend reachable (" + (j.backend || "supabase") + ")";
-          } else {
-            dot.className = "dot down";
-            status.textContent = "backend not ready: " + (j.reason || "unknown");
-          }
+          $("dot").className = "dot " + (ok && j.ok ? "ok" : "down");
+          $("status").textContent = ok && j.ok
+            ? "backend reachable (" + (j.backend || "supabase") + ")"
+            : "backend not ready: " + (j.reason || "unknown");
         })
         .catch((e) => {
-          document.getElementById("dot").className = "dot down";
-          document.getElementById("status").textContent = "server unreachable: " + e.message;
+          $("dot").className = "dot down";
+          $("status").textContent = "server unreachable: " + e.message;
         });
+
+      refreshAuth();
     </script>
   </body>
 </html>
