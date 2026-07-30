@@ -208,8 +208,20 @@ async function persistTouchpoint(ownerId: string, tp: RawTouchpoint): Promise<vo
   }
 }
 
+/**
+ * Outcome of one ingestion pass. `failed` counts accounts that errored (and
+ * were marked `status: "error"`). The scheduler ignores this — one bad account
+ * shouldn't stop the loop — but one-shot callers (`prm ingest`) use `failed` to
+ * exit non-zero so a smoke test surfaces the problem instead of reporting "done".
+ */
+export interface IngestSummary {
+  accounts: number;
+  ingested: number;
+  failed: number;
+}
+
 /** Poll every connected account for its owner and ingest new touchpoints. */
-export async function runIngestion(): Promise<void> {
+export async function runIngestion(): Promise<IngestSummary> {
   const db = serviceClient();
   const { data: accounts, error } = await db
     .from("account")
@@ -219,9 +231,11 @@ export async function runIngestion(): Promise<void> {
 
   if (!accounts || accounts.length === 0) {
     log.info("no active accounts to ingest");
-    return;
+    return { accounts: 0, ingested: 0, failed: 0 };
   }
 
+  let ingested = 0;
+  let failed = 0;
   for (const account of accounts as Account[]) {
     try {
       const touchpoints = await fetchTouchpoints(account);
@@ -234,6 +248,7 @@ export async function runIngestion(): Promise<void> {
         .update({ last_cursor: nextCursor(account.provider) })
         .eq("id", account.id);
       if (cErr) throw cErr;
+      ingested += touchpoints.length;
       if (touchpoints.length > 0) {
         log.info("ingested touchpoints", {
           account: account.id,
@@ -242,9 +257,12 @@ export async function runIngestion(): Promise<void> {
         });
       }
     } catch (err) {
-      // One bad account shouldn't stop the others; mark it and move on.
+      // One bad account shouldn't stop the others; mark it and move on. The
+      // failure is still reflected in the returned summary for one-shot callers.
+      failed++;
       log.error("account ingest failed", { account: account.id, message: (err as Error).message });
       await db.from("account").update({ status: "error" }).eq("id", account.id);
     }
   }
+  return { accounts: accounts.length, ingested, failed };
 }

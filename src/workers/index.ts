@@ -26,7 +26,14 @@ const log = logger("worker");
  * Unlike the scheduler, one-shot mode does NOT swallow failures — a job that
  * throws exits non-zero so the caller (and `prm ingest`) sees the error.
  */
-async function safe(name: string, fn: () => Promise<void>) {
+/**
+ * A job's outcome. Jobs that isolate per-item failures (ingestion) don't throw
+ * on a partial failure; they report `failed > 0` here instead, so one-shot mode
+ * can still exit non-zero. Jobs with nothing to report resolve `void`.
+ */
+type JobResult = { failed?: number; accounts?: number } | void;
+
+async function safe(name: string, fn: () => Promise<JobResult>) {
   const started = Date.now();
   try {
     await fn();
@@ -36,7 +43,7 @@ async function safe(name: string, fn: () => Promise<void>) {
   }
 }
 
-const JOBS: Record<string, () => Promise<void>> = {
+const JOBS: Record<string, () => Promise<JobResult>> = {
   ingest: runIngestion,
   cadence: runCadence,
 };
@@ -66,8 +73,18 @@ async function runOnce(jobs: string[]): Promise<void> {
     const started = Date.now();
     try {
       log.info(`${name} (once) starting`);
-      await fn();
-      log.info(`${name} (once) done`, { ms: Date.now() - started });
+      const result = await fn();
+      // Jobs that isolate per-item failures resolve normally but report
+      // `failed > 0`; surface that as a non-zero exit for one-shot callers.
+      if (result && typeof result.failed === "number" && result.failed > 0) {
+        log.error(`${name} (once) had account failures`, {
+          failed: result.failed,
+          accounts: result.accounts,
+        });
+        process.exitCode = 1;
+      } else {
+        log.info(`${name} (once) done`, { ms: Date.now() - started });
+      }
     } catch (err) {
       log.error(`${name} (once) failed`, { message: (err as Error).message });
       process.exitCode = 1;
