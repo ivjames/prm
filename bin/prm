@@ -44,7 +44,7 @@ cmd_deploy() {
   log "building"
   npm run build
   log "applying migrations"
-  cmd_migrate
+  cmd_migrate --soft
   log "restarting pm2"
   pm2 restart "$WEB_PROC" "$WORKER_PROC" --update-env || pm2 start ecosystem.config.cjs
   pm2 save
@@ -67,9 +67,21 @@ cmd_once() {
 cmd_ingest()  { cmd_once ingest; }
 cmd_cadence() { cmd_once cadence; }
 
+# migrate [--soft]
+# Migrations on this hybrid setup are applied out-of-band against Supabase
+# (dashboard SQL editor or a linked `supabase` CLI), so the droplet doesn't
+# strictly need the CLI. `--soft` (used by deploy) warns and continues when the
+# CLI is absent, so a deploy is never blocked by it; a bare `prm migrate` still
+# fails loudly, since calling it directly is an explicit request to migrate.
 cmd_migrate() {
   cd_app
-  command -v supabase >/dev/null || die "supabase CLI not found; install it or run migrations manually (see DEPLOY.md)."
+  if ! command -v supabase >/dev/null; then
+    if [ "${1:-}" = "--soft" ]; then
+      log "supabase CLI not found — skipping migrations (apply them via the Supabase dashboard or a linked CLI; see DEPLOY.md)"
+      return 0
+    fi
+    die "supabase CLI not found; install it or run migrations manually (see DEPLOY.md)."
+  fi
   # Uses the linked project / SUPABASE_DB_URL. Non-interactive.
   supabase db push
 }
