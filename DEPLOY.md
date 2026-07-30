@@ -97,23 +97,55 @@ background read token the ingestion worker uses — is separate and wired throug
 exchanges the code, stores the refresh token encrypted via `store_account_token`
 (the vault), and creates `account` rows for `gmail` + `gcal`.
 
+One Google Cloud OAuth client can serve **both** flows — reuse the same client
+id/secret; just register both redirect URIs on it.
+
 One-time Google Cloud setup:
 
 1. In a Google Cloud project, enable the **Gmail API** and **Calendar API**.
-2. Configure the OAuth **consent screen**; add the scopes
+2. Configure the OAuth **consent screen** (External, in Testing). Add the scopes
    `gmail.readonly` and `calendar.readonly` (both *restricted* — a CASA
    assessment is required before any non-personal/public use; fine for personal
-   use with the owner added as a test user).
-3. Create an **OAuth 2.0 Client ID** (type: Web application) with the authorized
-   redirect URI `https://prm.lab980.com/api/connect/google/callback`.
-4. Put the client id/secret in `.env` as `GOOGLE_OAUTH_CLIENT_ID` /
-   `GOOGLE_OAUTH_CLIENT_SECRET`, then `prm restart`.
+   use). Under **Test users**, add the owner's Google account — restricted-scope
+   consent is blocked for anyone not on that list while the app is in Testing.
+3. Create an **OAuth 2.0 Client ID** (type: Web application). Add **both**
+   authorized redirect URIs:
+   - `https://prm.lab980.com/api/connect/google/callback` — the **data-access**
+     flow (the app exchanges the code directly).
+   - `https://<project-ref>.supabase.co/auth/v1/callback` — the **login** flow
+     ("Sign in with Google"), which routes through Supabase Auth. Supabase shows
+     this exact URL on its Google provider page. Skip this URI if you only want
+     email/password login.
+4. Put the client id/secret in the droplet `.env` as `GOOGLE_OAUTH_CLIENT_ID` /
+   `GOOGLE_OAUTH_CLIENT_SECRET` (these drive the **data-access** flow), then
+   `prm restart`.
 
-Then: sign in, click **Connect Gmail & Calendar** (or hit `/api/connect/google`),
-grant consent. From then on `prm-worker` polls on `INGEST_CRON` and the pipeline
-runs end to end — entity resolution → interactions → cadence reset. `readyz`
-stays green regardless; check `prm logs` for `ingested touchpoints`.
+One-time Supabase setup (only for "Sign in with Google"):
 
-> Note: the consent uses `access_type=offline` + `prompt=consent` to guarantee a
-> refresh token. If a stale prior grant means Google returns none, revoke the
-> app at myaccount.google.com → Security → third-party access, and reconnect.
+5. Dashboard → **Authentication → Providers → Google**: enable it and paste the
+   **same** client id/secret. (Supabase persists login sessions itself; the
+   droplet `.env` copy is what the data-access ingestion flow uses — they're
+   independent, so keeping them in sync is fine.)
+6. Dashboard → **Authentication → URL Configuration → Redirect URLs**: allow-list
+   `https://prm.lab980.com/api/auth/callback` (the `redirectTo` the login flow
+   sends), and set the **Site URL** to `https://prm.lab980.com`.
+
+Then: sign in (Google or email/password), click **Connect Gmail & Calendar** (or
+hit `/api/connect/google`), grant consent. That vaults the refresh token and
+creates the `gmail` + `gcal` account rows.
+
+Test the pipeline immediately instead of waiting for `INGEST_CRON`:
+
+```sh
+prm ingest      # run one ingestion poll now; non-zero exit if it fails
+prm logs        # watch for `ingested touchpoints`
+```
+
+From then on `prm-worker` polls on `INGEST_CRON` and the pipeline runs end to
+end — entity resolution → interactions → cadence reset. `readyz` stays green
+regardless of connection state.
+
+> Note: the data-access consent uses `access_type=offline` + `prompt=consent` to
+> guarantee a refresh token. If a stale prior grant means Google returns none,
+> `/callback` reports it — revoke the app at myaccount.google.com → Security →
+> third-party access, and reconnect.
