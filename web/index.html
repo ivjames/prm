@@ -67,6 +67,8 @@
       <!-- signed-in -->
       <section id="account" class="card hidden">
         <p class="who">Signed in as <b id="who-email"></b></p>
+        <div class="msg" id="connected-msg" style="color:#22c55e"></div>
+        <a class="btn btn-google" href="/api/connect/google">Connect Gmail &amp; Calendar</a>
         <button class="btn-ghost" id="signout">Sign out</button>
       </section>
 
@@ -83,6 +85,9 @@
           if (r.ok) {
             const { user } = await r.json();
             $("who-email").textContent = user?.email ?? user?.id ?? "(unknown)";
+            if (new URLSearchParams(location.search).get("connected") === "google") {
+              $("connected-msg").textContent = "Gmail & Calendar connected — ingestion will pick it up shortly.";
+            }
             show($("account"), true);
             show($("signin"), false);
           } else {

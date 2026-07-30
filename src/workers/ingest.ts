@@ -1,6 +1,7 @@
 import { serviceClient } from "../supabase";
 import { logger } from "../lib/logger";
 import { resolvePerson, IdentifierType } from "./entity-resolution";
+import { GoogleToken, refresh } from "../lib/google-oauth";
 
 const log = logger("ingest");
 
@@ -14,29 +15,147 @@ export interface RawTouchpoint {
   source: "gmail" | "gcal" | "graph";
   direction: "in" | "out" | "mutual";
   occurredAt: string; // ISO
-  summary: string; // subject / event title — metadata only, not full bodies
+  summary: string; // subject / title — metadata only, not full bodies
   participants: { type: IdentifierType; value: string; displayName?: string }[];
 }
 
-/**
- * Provider fetch. Real implementation pulls new messages/events since the
- * account's last cursor using the OAuth token from the encrypted vault.
- *
- * NOT wired yet: needs GOOGLE_OAUTH credentials + the vault read path (see
- * migrations 0003 and DEPLOY.md). Returns [] so the pipeline below is
- * exercisable end-to-end the moment an account + token exist.
- */
-async function fetchNewTouchpoints(account: {
+interface Account {
   id: string;
   owner_id: string;
   provider: string;
-}): Promise<RawTouchpoint[]> {
-  log.info("provider fetch not yet wired; skipping account", {
-    account: account.id,
-    provider: account.provider,
-  });
+  external_account_id: string;
+  last_cursor: string | null;
+}
+
+// ---- token handling ----
+
+/**
+ * Return a valid access token for an account, refreshing (and re-storing) it if
+ * it's within a minute of expiry. null if there's no usable token.
+ */
+async function freshAccessToken(account: Account): Promise<string | null> {
+  const db = serviceClient();
+  const { data, error } = await db.rpc("read_account_token", { p_account_id: account.id });
+  if (error) throw error;
+  if (!data) {
+    log.warn("no stored token for account", { account: account.id });
+    return null;
+  }
+  let token: GoogleToken = JSON.parse(data as string);
+  if (Date.now() > token.expiry_ms - 60_000) {
+    if (!token.refresh_token) {
+      log.warn("token expired and no refresh_token", { account: account.id });
+      return null;
+    }
+    token = await refresh(token.refresh_token);
+    const { error: sErr } = await db.rpc("store_account_token", {
+      p_account_id: account.id,
+      p_token_json: JSON.stringify(token),
+    });
+    if (sErr) throw sErr;
+  }
+  return token.access_token;
+}
+
+// ---- provider fetch ----
+
+async function gapi(url: string, accessToken: string): Promise<any> {
+  const res = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
+  if (!res.ok) throw new Error(`google api ${res.status} ${url.split("?")[0]}: ${await res.text()}`);
+  return res.json();
+}
+
+function extractEmails(...headerValues: (string | undefined)[]): string[] {
+  const joined = headerValues.filter(Boolean).join(",");
+  const matches = joined.match(/[^\s<>,;"]+@[^\s<>,;"]+/g) ?? [];
+  return [...new Set(matches.map((e) => e.toLowerCase()))];
+}
+
+const DEFAULT_LOOKBACK_S = 7 * 24 * 3600;
+
+async function fetchGmail(account: Account, accessToken: string): Promise<RawTouchpoint[]> {
+  const since = account.last_cursor
+    ? Number(account.last_cursor)
+    : Math.floor(Date.now() / 1000) - DEFAULT_LOOKBACK_S;
+  const list = await gapi(
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25&q=${encodeURIComponent(
+      `after:${since}`,
+    )}`,
+    accessToken,
+  );
+  const ids: string[] = (list.messages ?? []).map((m: any) => m.id);
+  const out: RawTouchpoint[] = [];
+  for (const id of ids) {
+    const m = await gapi(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata` +
+        `&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject`,
+      accessToken,
+    );
+    const headers: Record<string, string> = Object.fromEntries(
+      (m.payload?.headers ?? []).map((h: any) => [String(h.name).toLowerCase(), h.value]),
+    );
+    const owner = account.external_account_id.toLowerCase();
+    const ownerIsSender = extractEmails(headers.from).includes(owner);
+    const participants = extractEmails(headers.from, headers.to, headers.cc)
+      .filter((e) => e !== owner)
+      .map((value) => ({ type: "email" as IdentifierType, value }));
+    out.push({
+      externalId: id,
+      source: "gmail",
+      direction: ownerIsSender ? "out" : "in",
+      occurredAt: new Date(Number(m.internalDate)).toISOString(),
+      summary: headers.subject ?? "(no subject)",
+      participants,
+    });
+  }
+  return out;
+}
+
+async function fetchCalendar(account: Account, accessToken: string): Promise<RawTouchpoint[]> {
+  const params = new URLSearchParams({ singleEvents: "true", orderBy: "updated", maxResults: "25" });
+  if (account.last_cursor) params.set("updatedMin", account.last_cursor);
+  else params.set("timeMin", new Date(Date.now() - DEFAULT_LOOKBACK_S * 1000).toISOString());
+  const res = await gapi(
+    `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params.toString()}`,
+    accessToken,
+  );
+  const owner = account.external_account_id.toLowerCase();
+  const out: RawTouchpoint[] = [];
+  for (const ev of res.items ?? []) {
+    const when: string | undefined = ev.start?.dateTime ?? ev.start?.date;
+    if (!when || ev.status === "cancelled") continue;
+    const participants = (ev.attendees ?? [])
+      .map((a: any) => String(a.email ?? "").toLowerCase())
+      .filter((e: string) => e && e !== owner)
+      .map((value: string) => ({ type: "email" as IdentifierType, value }));
+    out.push({
+      externalId: ev.id,
+      source: "gcal",
+      direction: "mutual",
+      occurredAt: new Date(when).toISOString(),
+      summary: ev.summary ?? "(untitled event)",
+      participants,
+    });
+  }
+  return out;
+}
+
+async function fetchTouchpoints(account: Account): Promise<RawTouchpoint[]> {
+  const accessToken = await freshAccessToken(account);
+  if (!accessToken) return [];
+  if (account.provider === "gmail") return fetchGmail(account, accessToken);
+  if (account.provider === "gcal") return fetchCalendar(account, accessToken);
+  log.warn("no fetcher for provider", { provider: account.provider });
   return [];
 }
+
+/** The cursor value to persist after a successful poll of this provider. */
+function nextCursor(provider: string): string {
+  if (provider === "gmail") return String(Math.floor(Date.now() / 1000)); // epoch seconds for after:
+  return new Date().toISOString(); // updatedMin for calendar
+}
+
+// ---- persistence ----
 
 /**
  * Persist a touchpoint: resolve every participant to a canonical Person, write
@@ -94,7 +213,7 @@ export async function runIngestion(): Promise<void> {
   const db = serviceClient();
   const { data: accounts, error } = await db
     .from("account")
-    .select("id, owner_id, provider")
+    .select("id, owner_id, provider, external_account_id, last_cursor")
     .eq("status", "active");
   if (error) throw error;
 
@@ -103,13 +222,29 @@ export async function runIngestion(): Promise<void> {
     return;
   }
 
-  for (const account of accounts) {
-    const touchpoints = await fetchNewTouchpoints(account);
-    for (const tp of touchpoints) {
-      await persistTouchpoint(account.owner_id, tp);
-    }
-    if (touchpoints.length > 0) {
-      log.info("ingested touchpoints", { account: account.id, count: touchpoints.length });
+  for (const account of accounts as Account[]) {
+    try {
+      const touchpoints = await fetchTouchpoints(account);
+      for (const tp of touchpoints) {
+        await persistTouchpoint(account.owner_id, tp);
+      }
+      // Advance the cursor only after a clean poll, so a mid-run failure re-polls.
+      const { error: cErr } = await db
+        .from("account")
+        .update({ last_cursor: nextCursor(account.provider) })
+        .eq("id", account.id);
+      if (cErr) throw cErr;
+      if (touchpoints.length > 0) {
+        log.info("ingested touchpoints", {
+          account: account.id,
+          provider: account.provider,
+          count: touchpoints.length,
+        });
+      }
+    } catch (err) {
+      // One bad account shouldn't stop the others; mark it and move on.
+      log.error("account ingest failed", { account: account.id, message: (err as Error).message });
+      await db.from("account").update({ status: "error" }).eq("id", account.id);
     }
   }
 }

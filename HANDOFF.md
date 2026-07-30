@@ -7,9 +7,12 @@
 > encrypted OAuth token vault, the cadence recompute function, a web/API server
 > (`src/server.ts`), the ingestion + cadence workers with entity resolution
 > (`src/workers/`), pm2 + operate-CLI + provisioning runbook (`DEPLOY.md`).
-> **Not yet built:** the data-access OAuth flow (provider fetch in
-> `src/workers/ingest.ts` is a stub), voice capture, and the Capacitor client.
-> The spec below still governs — treat `docs/` as the source of truth.
+> Login is cookie-based (`@supabase/ssr`) with a web-shell UI, and the
+> **data-access OAuth ingestion is live**: `/api/connect/google` grants
+> Gmail + Calendar read access, tokens are vaulted, and `prm-worker` pulls
+> touchpoints → entity resolution → interactions → cadence on `INGEST_CRON`.
+> **Not yet built:** voice capture and the Capacitor client. The spec below
+> still governs — treat `docs/` as the source of truth.
 
 The `docs/` files are the accumulated output of a scoping conversation; treat them as the spec to build from, not aspirational notes.
 
