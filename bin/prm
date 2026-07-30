@@ -26,6 +26,8 @@ Usage: prm <command>
   logs       tail pm2 logs (both processes)
   status     pm2 status for the two processes
   migrate    apply Supabase migrations (supabase db push)
+  ingest     run one ingestion poll now (on-demand; doesn't wait for the cron)
+  cadence    run one cadence/overdue recompute now (on-demand)
   backup     dump the app-dir .env + a schema snapshot into data/backups/
   help       this text
 USAGE
@@ -42,7 +44,7 @@ cmd_deploy() {
   log "building"
   npm run build
   log "applying migrations"
-  cmd_migrate
+  cmd_migrate --soft
   log "restarting pm2"
   pm2 restart "$WEB_PROC" "$WORKER_PROC" --update-env || pm2 start ecosystem.config.cjs
   pm2 save
@@ -53,9 +55,33 @@ cmd_restart() { pm2 restart "$WEB_PROC" "$WORKER_PROC" --update-env; }
 cmd_logs()    { pm2 logs "$WEB_PROC" "$WORKER_PROC"; }
 cmd_status()  { pm2 status "$WEB_PROC" "$WORKER_PROC"; }
 
+# On-demand worker runs. The worker's --once mode runs the job a single time and
+# exits non-zero on failure, so these surface errors directly (unlike the
+# scheduler, which swallows them). Needs a prior `npm run build` (deploy does it).
+cmd_once() {
+  cd_app
+  [ -f dist/workers/index.js ] || die "dist/workers/index.js not found — run 'npm run build' (or 'prm deploy') first."
+  log "running one-shot: $1"
+  node dist/workers/index.js --once "$1"
+}
+cmd_ingest()  { cmd_once ingest; }
+cmd_cadence() { cmd_once cadence; }
+
+# migrate [--soft]
+# Migrations on this hybrid setup are applied out-of-band against Supabase
+# (dashboard SQL editor or a linked `supabase` CLI), so the droplet doesn't
+# strictly need the CLI. `--soft` (used by deploy) warns and continues when the
+# CLI is absent, so a deploy is never blocked by it; a bare `prm migrate` still
+# fails loudly, since calling it directly is an explicit request to migrate.
 cmd_migrate() {
   cd_app
-  command -v supabase >/dev/null || die "supabase CLI not found; install it or run migrations manually (see DEPLOY.md)."
+  if ! command -v supabase >/dev/null; then
+    if [ "${1:-}" = "--soft" ]; then
+      log "supabase CLI not found — skipping migrations (apply them via the Supabase dashboard or a linked CLI; see DEPLOY.md)"
+      return 0
+    fi
+    die "supabase CLI not found; install it or run migrations manually (see DEPLOY.md)."
+  fi
   # Uses the linked project / SUPABASE_DB_URL. Non-interactive.
   supabase db push
 }
@@ -80,6 +106,8 @@ case "${1:-help}" in
   logs)    cmd_logs;;
   status)  cmd_status;;
   migrate) cmd_migrate;;
+  ingest)  cmd_ingest;;
+  cadence) cmd_cadence;;
   backup)  cmd_backup;;
   help|-h|--help) usage;;
   *) usage; exit 1;;
