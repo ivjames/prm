@@ -2,6 +2,7 @@ import { serviceClient } from "../supabase";
 import { logger } from "../lib/logger";
 import { resolvePerson, IdentifierType } from "./entity-resolution";
 import { GoogleToken, refresh } from "../lib/google-oauth";
+import { isRoleAddress } from "../lib/addresses";
 
 const log = logger("ingest");
 
@@ -125,10 +126,12 @@ async function fetchGmail(account: Account, accessToken: string): Promise<RawTou
   const since = account.last_cursor
     ? Number(account.last_cursor)
     : Math.floor(Date.now() / 1000) - DEFAULT_LOOKBACK_S;
+  // Balanced junk filter: exclude Gmail's bulk categories at the query level so
+  // newsletters/promotions/social/notifications never enter the pipeline. This
+  // keeps the Primary inbox + all Sent mail.
+  const query = `after:${since} -category:promotions -category:social -category:updates -category:forums`;
   const list = await gapi(
-    `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25&q=${encodeURIComponent(
-      `after:${since}`,
-    )}`,
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25&q=${encodeURIComponent(query)}`,
     accessToken,
   );
   const ids: string[] = (list.messages ?? []).map((m: any) => m.id);
@@ -136,12 +139,19 @@ async function fetchGmail(account: Account, accessToken: string): Promise<RawTou
   for (const id of ids) {
     const m = await gapi(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata` +
-        `&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject`,
+        `&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject` +
+        `&metadataHeaders=List-Unsubscribe&metadataHeaders=List-Id&metadataHeaders=Precedence`,
       accessToken,
     );
     const headers: Record<string, string> = Object.fromEntries(
       (m.payload?.headers ?? []).map((h: any) => [String(h.name).toLowerCase(), h.value]),
     );
+    // Bulk/automated mail carries list headers or a bulk Precedence — skip it
+    // even if it slipped past the category filter (mailing lists, transactional).
+    const precedence = (headers["precedence"] ?? "").toLowerCase();
+    if (headers["list-unsubscribe"] || headers["list-id"] || ["bulk", "list", "junk"].includes(precedence)) {
+      continue;
+    }
     const owner = account.external_account_id.toLowerCase();
     const from = parseAddresses(headers.from);
     const ownerIsSender = from.some((a) => a.email === owner);
@@ -150,7 +160,9 @@ async function fetchGmail(account: Account, accessToken: string): Promise<RawTou
       ...from,
       ...parseAddresses(headers.to),
       ...parseAddresses(headers.cc),
-    );
+    ).filter((p) => !isRoleAddress(p.value));
+    // No human counterpart left (e.g. from a no-reply) — not a relationship touchpoint.
+    if (participants.length === 0) continue;
     out.push({
       externalId: id,
       source: "gmail",
@@ -187,7 +199,10 @@ async function fetchCalendar(account: Account, accessToken: string): Promise<Raw
         name: ev.organizer.displayName || undefined,
       });
     }
-    const participants = toParticipants(owner, ...attendees);
+    const participants = toParticipants(owner, ...attendees).filter((p) => !isRoleAddress(p.value));
+    // Solo events (holidays, self-blocks) and room/no-reply invites have no human
+    // counterpart — skip so they don't clutter the timeline.
+    if (participants.length === 0) continue;
     out.push({
       externalId: ev.id,
       source: "gcal",
