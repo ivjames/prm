@@ -76,8 +76,8 @@
 
       /* people list */
       .list { border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
-      .list-tools { padding: 0.75rem; display: flex; gap: 0.5rem; align-items: center; border-bottom: 1px solid var(--border); }
-      .list-tools input { flex: 1; }
+      .list-tools { padding: 0.75rem; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+      .list-tools input { flex: 1; min-width: 8rem; }
       .people { overflow-y: auto; flex: 1; }
       .person {
         display: flex; align-items: center; gap: 0.6rem; width: 100%;
@@ -126,6 +126,16 @@
       .tl .body { min-width: 0; flex: 1; }
       .tl .sum { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .tl .meta { font-size: 0.74rem; color: var(--muted); }
+      .dupe-group { border: 1px solid var(--border); border-radius: 10px; padding: 0.85rem; margin: 0 0 0.85rem; background: var(--panel); }
+      .dupe-hint { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.6rem; }
+      .dupe-members { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.75rem; }
+      .dupe-member { display: flex; align-items: flex-start; gap: 0.55rem; padding: 0.45rem 0.55rem; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+      .dupe-member:has(input:checked) { border-color: var(--accent); background: var(--panel-2); }
+      .dupe-member input { margin-top: 0.2rem; width: auto; flex: none; }
+      .dupe-who { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+      .dupe-name { font-weight: 600; }
+      .dupe-emails { font-size: 0.78rem; color: var(--muted); word-break: break-word; }
+      .dupe-merge { width: auto; }
       .empty { color: var(--dim); padding: 2.5rem 1rem; text-align: center; }
       .backlink { display: none; }
       @media (max-width: 720px) { .backlink { display: inline-flex; margin-bottom: 0.75rem; } }
@@ -171,6 +181,7 @@
         <div class="list" id="list-col">
           <div class="list-tools">
             <input id="search" type="search" placeholder="Search contacts…" autocomplete="off" />
+            <button class="btn btn-ghost btn-sm" id="dupe-toggle" title="Find &amp; merge duplicate contacts">Dupes</button>
             <button class="btn btn-ghost btn-sm" id="arch-toggle" title="Show archived contacts">Archived</button>
             <button class="btn btn-primary btn-sm" id="add-btn">+ Add</button>
           </div>
@@ -327,6 +338,67 @@
           ${renderCadence(person)}
           <div class="tl-head">Timeline${timeline.length ? ` · ${timeline.length}` : ""}</div>
           <ul class="tl">${items}</ul>`;
+      }
+
+      // ---- duplicates ----
+      async function showDuplicates() {
+        state.selectedId = null;
+        renderPeople();
+        $("detail").classList.remove("detail-hidden-mobile");
+        $("detail").innerHTML = `<div class="empty">Scanning for duplicates…</div>`;
+        try {
+          const { groups } = await api("/api/people/duplicates");
+          $("detail").innerHTML = renderDuplicatesView(groups || []);
+        } catch (e) {
+          $("detail").innerHTML = `<div class="empty">Couldn't scan: ${esc(e.message)}</div>`;
+        }
+      }
+      function renderDuplicatesView(groups) {
+        const head = `<div class="tl-head" style="margin-bottom:0.7rem">Possible duplicates${groups.length ? ` · ${groups.length}` : ""}</div>`;
+        if (!groups.length) return head + `<div class="empty">No likely duplicates found.</div>`;
+        const body = groups
+          .map((g, gi) => {
+            const members = g.members
+              .map(
+                (m, mi) => `<label class="dupe-member">
+                    <input type="radio" name="keep-${gi}" value="${esc(m.id)}" ${mi === 0 ? "checked" : ""} />
+                    <span class="dupe-who"><span class="dupe-name">${esc(m.name)}</span>${
+                      m.emails.length ? `<span class="dupe-emails">${esc(m.emails.join(", "))}</span>` : ""
+                    }</span>
+                  </label>`,
+              )
+              .join("");
+            return `<div class="dupe-group">
+                <div class="dupe-hint">Keep which one? The rest merge into it (can't be undone).</div>
+                <div class="dupe-members">${members}</div>
+                <button class="btn btn-primary btn-sm dupe-merge" data-gi="${gi}" data-ids="${esc(g.members.map((m) => m.id).join(","))}">Merge ${g.members.length} →</button>
+              </div>`;
+          })
+          .join("");
+        return head + body;
+      }
+      async function mergeDupe(btn) {
+        const gi = btn.dataset.gi;
+        const ids = btn.dataset.ids.split(",");
+        const keep = document.querySelector(`input[name="keep-${gi}"]:checked`);
+        if (!keep) return;
+        const target = keep.value;
+        const sources = ids.filter((id) => id !== target);
+        if (!sources.length) return;
+        btn.disabled = true;
+        btn.textContent = "Merging…";
+        try {
+          await api(`/api/people/${encodeURIComponent(target)}/merge`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ sources }),
+          });
+          await Promise.all([showDuplicates(), loadPeople()]);
+        } catch (e) {
+          btn.disabled = false;
+          btn.textContent = "Merge";
+          alert("Merge failed: " + (e.message || "error"));
+        }
       }
 
       // ---- archive ----
@@ -509,6 +581,8 @@
         }
       });
       $("detail").addEventListener("click", (e) => {
+        const dm = e.target.closest(".dupe-merge");
+        if (dm) { mergeDupe(dm); return; }
         const b = e.target.closest("#sum-btn");
         if (b) { summarize(b.dataset.pid, b); return; }
         const a = e.target.closest("#arch-btn");
@@ -521,6 +595,7 @@
         }
       });
       $("arch-toggle").addEventListener("click", () => setArchivedView(!state.viewArchived));
+      $("dupe-toggle").addEventListener("click", showDuplicates);
       $("detail").addEventListener("change", (e) => {
         const sel = e.target.closest("#cad-select");
         if (sel) {

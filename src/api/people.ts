@@ -1,6 +1,8 @@
 import { Router, Response } from "express";
 import { AuthedRequest, requireUser } from "./auth";
+import { serviceClient } from "../supabase";
 import { aiConfigured, summarizeRelationship } from "../lib/anthropic";
+import { normalizeName, nameSimilarity, DUPLICATE_THRESHOLD } from "../lib/names";
 
 /**
  * People + their timeline. Everything goes through req.db (RLS-scoped to the
@@ -23,6 +25,65 @@ peopleRouter.get("/", async (req: AuthedRequest, res: Response, next) => {
     const { data, error } = await q;
     if (error) throw error;
     res.json({ people: data ?? [] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/people/duplicates — fuzzy-cluster likely-duplicate contacts (same
+// human, different addresses) for the owner to review and merge. Suggestions
+// only; nothing is merged here. Registered before /:id so it isn't read as an id.
+peopleRouter.get("/duplicates", async (req: AuthedRequest, res: Response, next) => {
+  try {
+    const { data, error } = await req
+      .db!.from("person")
+      .select("id, name, tags, identifier(value)")
+      .is("archived_at", null);
+    if (error) throw error;
+
+    type P = { id: string; name: string; tags: string[]; identifier: { value: string }[] };
+    const people = ((data ?? []) as P[]).map((p) => ({
+      id: p.id,
+      name: p.name,
+      emails: (p.identifier ?? []).map((i) => i.value),
+      norm: normalizeName(p.name),
+    })).filter((p) => p.norm); // only name-matchable contacts
+
+    // Union-find clustering on pairwise name similarity.
+    const parent = new Map<string, string>();
+    people.forEach((p) => parent.set(p.id, p.id));
+    const find = (x: string): string => {
+      let r = x;
+      while (parent.get(r) !== r) r = parent.get(r)!;
+      let c = x;
+      while (parent.get(c) !== r) { const n = parent.get(c)!; parent.set(c, r); c = n; }
+      return r;
+    };
+    const union = (a: string, b: string) => parent.set(find(a), find(b));
+    for (let i = 0; i < people.length; i++) {
+      for (let j = i + 1; j < people.length; j++) {
+        if (nameSimilarity(people[i].norm, people[j].norm) >= DUPLICATE_THRESHOLD) {
+          union(people[i].id, people[j].id);
+        }
+      }
+    }
+
+    const byRoot = new Map<string, typeof people>();
+    for (const p of people) {
+      const r = find(p.id);
+      (byRoot.get(r) ?? byRoot.set(r, []).get(r)!).push(p);
+    }
+    const groups = [...byRoot.values()]
+      .filter((g) => g.length > 1)
+      .map((g) => ({
+        // Real-named members first, then by how many addresses they carry —
+        // a good default "canonical" for the client to pre-select.
+        members: g
+          .map((m) => ({ id: m.id, name: m.name, emails: m.emails }))
+          .sort((a, b) => Number(b.name.includes("@")) - Number(a.name.includes("@")) || b.emails.length - a.emails.length),
+      }));
+
+    res.json({ groups });
   } catch (err) {
     next(err);
   }
@@ -128,6 +189,39 @@ peopleRouter.delete("/:id/cadence", async (req: AuthedRequest, res: Response, ne
     const { error } = await req.db!.from("cadence").delete().eq("person_id", id);
     if (error) throw error;
     res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/people/:id/merge { sources: [id, …] } — merge the source contacts
+// into this one (the kept/canonical). Ownership is verified against the caller
+// (RLS), then the atomic merge_people function repoints all references. Explicit
+// and not reversible — the client confirms before calling.
+peopleRouter.post("/:id/merge", async (req: AuthedRequest, res: Response, next) => {
+  try {
+    const target = req.params.id;
+    const sources: string[] = Array.isArray(req.body?.sources)
+      ? req.body.sources.filter((s: unknown) => typeof s === "string" && s !== target)
+      : [];
+    if (sources.length === 0) {
+      return res.status(400).json({ error: "sources must be a non-empty list of person ids" });
+    }
+    // Verify the caller owns the target and every source (RLS scopes this select).
+    const ids = [target, ...sources];
+    const { data: owned, error: oErr } = await req.db!.from("person").select("id").in("id", ids);
+    if (oErr) throw oErr;
+    const ownedSet = new Set((owned ?? []).map((p: { id: string }) => p.id));
+    if (!ids.every((id) => ownedSet.has(id))) {
+      return res.status(404).json({ error: "one or more people not found" });
+    }
+    // merge_people is service-role only; ownership already checked above.
+    const svc = serviceClient();
+    for (const source of sources) {
+      const { error: mErr } = await svc.rpc("merge_people", { p_target: target, p_source: source });
+      if (mErr) throw mErr;
+    }
+    res.json({ ok: true, merged: sources.length });
   } catch (err) {
     next(err);
   }
