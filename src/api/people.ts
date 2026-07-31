@@ -43,7 +43,7 @@ peopleRouter.get("/:id", async (req: AuthedRequest, res: Response, next) => {
     // more than one person, so this is a join table, not an FK on interaction).
     const { data: timeline, error: tErr } = await req
       .db!.from("interaction")
-      .select("id, source, direction, occurred_at, summary, interaction_person!inner(person_id)")
+      .select("id, source, direction, occurred_at, summary, link, interaction_person!inner(person_id)")
       .eq("interaction_person.person_id", id)
       .order("occurred_at", { ascending: false })
       .limit(100);
