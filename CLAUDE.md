@@ -109,7 +109,7 @@ Full runbook, including first-time bring-up and `.env` keys: `DEPLOY.md`.
   ```bash
   rm -rf /tmp/x && mkdir -p /tmp/x \
     && git archive HEAD | tar -x -C /tmp/x \
-    && cd /tmp/x && npm ci && npm run build
+    && ( cd /tmp/x && npm ci && npm run build )
   ```
 
   The `rm -rf` and `mkdir` are the point, not tidiness: `tar -x -C` into a
@@ -118,6 +118,10 @@ Full runbook, including first-time bring-up and `.env` keys: `DEPLOY.md`.
   or quietly stops being a clean-clone test. A kitchen-sink `.gitignore`
   eating a source dir is the classic thing this catches; `git ls-files <dir>`
   confirms what is actually tracked.
+  The subshell is load-bearing too: a bare `cd /tmp/x` leaves the caller
+  sitting in the temp dir, so pasting the block a second time `rm -rf`s its
+  own working directory and `git archive` fails with "Unable to read current
+  working directory".
 - pm2 process names are `prm-web` and `prm-worker`; `prm logs` tails them.
   A crash-looping worker with *empty* logs is the cluster-mode trap — check
   `~/.pm2/pm2.log`, not the app's own log.
