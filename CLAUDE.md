@@ -62,12 +62,23 @@ prm status                                   # did pm2 actually restart?
 health-check --site prm                      # DNS, upstream port, public URL, cert
 ```
 
-None of these establishes which build is **running**, and it's worth knowing
-why rather than assuming the first one does. `deploy` pulls, then `npm ci`,
-then builds, then restarts pm2 — under `set -euo pipefail`, so a failure
-anywhere after the pull leaves HEAD advanced while pm2 keeps serving the
-previous in-memory build. The `--ff-only` pull adds a second gap: a surviving
-tracked hand-edit means the built code can differ from HEAD even on a clean
+None of these establishes which build is **running**, and where a failed
+`deploy` leaves you depends on how far it got. The order is: pull → `npm ci` →
+build → `migrate --soft` → `pm2 restart` (both processes) → `pm2 save`, under
+`set -euo pipefail`.
+
+- **Failed before the restart** (install, build or migrate): HEAD is advanced
+  and pm2 is still serving the previous in-memory build. This is the case where
+  `rev-parse` misleads.
+- **Failed at the restart**: `prm-web` and `prm-worker` are restarted in one
+  command, so one can be on the new build and the other not. Check both in
+  `prm status` rather than assuming they match.
+- **Failed at `pm2 save`**: the new build *is* running — only the dump wasn't
+  written, so a reboot would resurrect the previous process list. Re-run
+  `pm2 save` rather than redeploying.
+
+The `--ff-only` pull adds a gap independent of all three: a surviving tracked
+hand-edit means the built code can differ from HEAD even on a completely clean
 run.
 
 This app exposes no build identity of its own, so "which revision is live"
