@@ -107,21 +107,22 @@ Full runbook, including first-time bring-up and `.env` keys: `DEPLOY.md`.
 - Verify a **clean** clone builds, not just the working tree:
 
   ```bash
-  rm -rf /tmp/x && mkdir -p /tmp/x \
-    && git archive HEAD | tar -x -C /tmp/x \
-    && ( cd /tmp/x && npm ci && npm run build )
+  d=$(mktemp -d) \
+    && git archive HEAD | tar -x -C "$d" \
+    && ( cd "$d" && npm ci && npm run build ) \
+    && rm -rf "$d"
   ```
 
-  The `rm -rf` and `mkdir` are the point, not tidiness: `tar -x -C` into a
-  directory that doesn't exist fails outright, and into one left over from a
-  previous run it merges over the stale files — so the check either can't run
-  or quietly stops being a clean-clone test. A kitchen-sink `.gitignore`
+  `mktemp -d` is the point, not tidiness. The directory has to exist — `tar -x
+  -C` into a missing one fails outright — and it has to be *empty*, or the
+  extract merges over an earlier run's files and the check quietly stops
+  testing a clean tree. A fixed `/tmp/x` gets both wrong, and on a shared
+  `/tmp` it lets two runs race, each able to delete the other's tree
+  mid-build. The subshell keeps you in the checkout, so `$d` and the `git
+  ls-files` below still resolve; the trailing `rm -rf` fires only on success,
+  leaving a failed build in `$d` to look at. A kitchen-sink `.gitignore`
   eating a source dir is the classic thing this catches; `git ls-files <dir>`
   confirms what is actually tracked.
-  The subshell is load-bearing too: a bare `cd /tmp/x` leaves the caller
-  sitting in the temp dir, so pasting the block a second time `rm -rf`s its
-  own working directory and `git archive` fails with "Unable to read current
-  working directory".
 - pm2 process names are `prm-web` and `prm-worker`; `prm logs` tails them.
   A crash-looping worker with *empty* logs is the cluster-mode trap — check
   `~/.pm2/pm2.log`, not the app's own log.
