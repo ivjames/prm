@@ -38,8 +38,29 @@ function buildApp() {
   // now); serve it and fall back to index.html for client-side routing.
   const webDir = path.resolve(__dirname, "..", "web");
   app.use(express.static(webDir));
+
+  // Does this path look like a request for a FILE rather than a client-side
+  // route? Only routes should get the SPA shell. Answering a file request with
+  // 200 + index.html makes the site impossible to audit from outside: a scan
+  // cannot tell "this file is served" from "this path does not exist". That is
+  // not hypothetical — a status-only sweep of this droplet reported eleven
+  // sites exposing /.git/config, and the proxied ones (this app among them)
+  // were returning index.html with a 200. express.static here is correctly
+  // scoped to web/ and nothing ever leaked, but no external check could show
+  // that, and the false positive cost real time.
+  //
+  // path.extname is NOT sufficient on its own. It reads the last dot of the
+  // basename, so "/.git/config", "/.git/HEAD" and "/.env" all return "" — the
+  // exact paths this is meant to cover. Dotted segments are matched separately.
+  //
+  // Dotted paths include /.well-known, which is deliberately not exempted:
+  // certbot's ACME challenge is served by nginx off disk and never proxied
+  // here, so a 404 from this app cannot affect certificate renewal.
+  const looksLikeFile = (p: string): boolean =>
+    path.extname(p) !== "" || p.split("/").some((seg) => seg.startsWith("."));
+
   app.get("*", (req, res, next) => {
-    if (req.path.startsWith("/api/")) return next();
+    if (req.path.startsWith("/api/") || looksLikeFile(req.path)) return next();
     res.sendFile(path.join(webDir, "index.html"));
   });
 
