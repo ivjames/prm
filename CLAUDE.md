@@ -67,9 +67,14 @@ None of these establishes which build is **running**, and where a failed
 build → `migrate --soft` → `pm2 restart` (both processes) → `pm2 save`, under
 `set -euo pipefail`.
 
-- **Failed before the restart** (install, build or migrate): HEAD is advanced
-  and pm2 is still serving the previous in-memory build. This is the case where
-  `rev-parse` misleads.
+- **Failed before the restart** (install, build or migrate): the running
+  processes still hold the previously built code — `npm run build` is `tsc`
+  into `dist/`, and node loaded that at start — but the site is **not** wholly
+  on the old revision. `web/` is tracked source served straight off disk
+  (`express.static` in `src/server.ts`), so any frontend files the pull touched
+  are live the moment the pull lands, with no restart. The result is the new
+  PWA shell talking to the old API and worker, which is worse than either being
+  stale, and the case where `rev-parse` misleads most.
 - **Failed at the restart**: `prm-web` and `prm-worker` are restarted in one
   command, so one can be on the new build and the other not. Check both in
   `prm status` rather than assuming they match.
