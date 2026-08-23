@@ -41,10 +41,25 @@ not a fact — keep whatever provisioning chose.
 On the droplet, as root:
 
 ```bash
-prm deploy      # pull, npm ci, build, pm2 restart, probe
-prm status      # HEAD, pm2 state, local + public probe, cert days
-prm logs        # tail this app's pm2 logs
+prm deploy      # git pull --ff-only, npm ci, build, soft migrate, pm2 restart
+prm status      # pm2 state of prm-web and prm-worker
+prm logs        # tail their pm2 logs
 ```
+
+`prm` also carries `migrate`, `ingest`, `backfill`, `cadence`, `cleanup`,
+`backup` and one-shot worker runs — see `bin/prm --help`.
+
+Two things `deploy` and `status` do **not** do, because it's easy to assume
+otherwise from the other lab980 sites: `deploy` ends at `pm2 save` without
+probing anything, and `status` reports pm2 only — no HEAD, no local or public
+probe, no cert expiry. So neither confirms that the right revision is live or
+that the site answers. Check that separately (`health-check --site prm`, or
+curl the public URL) before calling a deploy good.
+
+And `deploy` uses `git pull --ff-only`, not a hard reset. A tracked hand-edit on
+the droplet is therefore **not** wiped: a non-conflicting one survives into the
+running deploy, a conflicting one aborts the pull and the deploy fails. Most
+lab980 sites hard-reset; this one doesn't. Don't edit on the box.
 
 Full runbook, including first-time bring-up and `.env` keys: `DEPLOY.md`.
 
