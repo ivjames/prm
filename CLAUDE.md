@@ -53,8 +53,17 @@ Two things `deploy` and `status` do **not** do, because it's easy to assume
 otherwise from the other lab980 sites: `deploy` ends at `pm2 save` without
 probing anything, and `status` reports pm2 only — no HEAD, no local or public
 probe, no cert expiry. So neither confirms that the right revision is live or
-that the site answers. Check that separately (`health-check --site prm`, or
-curl the public URL) before calling a deploy good.
+that the site answers. Check both separately before calling a deploy good, and
+note they need different tools:
+
+```bash
+git -C /var/www/prm rev-parse --short HEAD   # which commit is actually live
+health-check --site prm                      # DNS, upstream port, public URL, cert
+```
+
+Nothing in this repo's CLI or in `health-check` reports the deployed revision —
+`health-check` covers reachability and the cert, not which commit is serving —
+so a stale-but-healthy checkout passes every other check there is.
 
 And `deploy` uses `git pull --ff-only`, not a hard reset. A tracked hand-edit on
 the droplet is therefore **not** wiped: a non-conflicting one survives into the
@@ -65,9 +74,10 @@ Full runbook, including first-time bring-up and `.env` keys: `DEPLOY.md`.
 
 ## Things worth knowing
 
-- `.env` and `data/` are gitignored, so they survive `deploy`'s hard reset
-  where everything else does not — which also means a missing key is invisible
-  in the repo. Keep `.env.example` current and list every key in `DEPLOY.md`.
+- `.env` and `data/` are gitignored, so `deploy` never touches them — and here
+  that is the *only* protection they have, since the pull is `--ff-only` rather
+  than a hard reset (see Deploying). It also means a missing key is invisible
+  in the repo: keep `.env.example` current and list every key in `DEPLOY.md`.
 - Verify a **clean** clone builds, not just the working tree:
   `git archive HEAD | tar -x -C /tmp/x && cd /tmp/x && npm ci && npm run build`.
   A kitchen-sink `.gitignore` quietly eating a source dir is the classic way
