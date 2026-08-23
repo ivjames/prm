@@ -105,9 +105,19 @@ Full runbook, including first-time bring-up and `.env` keys: `DEPLOY.md`.
   than a hard reset (see Deploying). It also means a missing key is invisible
   in the repo: keep `.env.example` current and list every key in `DEPLOY.md`.
 - Verify a **clean** clone builds, not just the working tree:
-  `git archive HEAD | tar -x -C /tmp/x && cd /tmp/x && npm ci && npm run build`.
-  A kitchen-sink `.gitignore` quietly eating a source dir is the classic way
-  this bites; `git ls-files <dir>` confirms what is actually tracked.
+
+  ```bash
+  rm -rf /tmp/x && mkdir -p /tmp/x \
+    && git archive HEAD | tar -x -C /tmp/x \
+    && cd /tmp/x && npm ci && npm run build
+  ```
+
+  The `rm -rf` and `mkdir` are the point, not tidiness: `tar -x -C` into a
+  directory that doesn't exist fails outright, and into one left over from a
+  previous run it merges over the stale files — so the check either can't run
+  or quietly stops being a clean-clone test. A kitchen-sink `.gitignore`
+  eating a source dir is the classic thing this catches; `git ls-files <dir>`
+  confirms what is actually tracked.
 - pm2 process names are `prm-web` and `prm-worker`; `prm logs` tails them.
   A crash-looping worker with *empty* logs is the cluster-mode trap — check
   `~/.pm2/pm2.log`, not the app's own log.
