@@ -57,13 +57,23 @@ that the site answers. Check both separately before calling a deploy good, and
 note they need different tools:
 
 ```bash
-git -C /var/www/prm rev-parse --short HEAD   # which commit is actually live
+git -C /var/www/prm rev-parse --short HEAD   # what the CHECKOUT is on
+prm status                                   # did pm2 actually restart?
 health-check --site prm                      # DNS, upstream port, public URL, cert
 ```
 
-Nothing in this repo's CLI or in `health-check` reports the deployed revision —
-`health-check` covers reachability and the cert, not which commit is serving —
-so a stale-but-healthy checkout passes every other check there is.
+None of these establishes which build is **running**, and it's worth knowing
+why rather than assuming the first one does. `deploy` pulls, then `npm ci`,
+then builds, then restarts pm2 — under `set -euo pipefail`, so a failure
+anywhere after the pull leaves HEAD advanced while pm2 keeps serving the
+previous in-memory build. The `--ff-only` pull adds a second gap: a surviving
+tracked hand-edit means the built code can differ from HEAD even on a clean
+run.
+
+This app exposes no build identity of its own, so "which revision is live"
+cannot currently be answered from outside. Until it does, the closest you get
+is: HEAD is what you intended **and** pm2's uptime shows it restarted when you
+expected. Treat anything less as unverified rather than as a pass.
 
 And `deploy` uses `git pull --ff-only`, not a hard reset. A tracked hand-edit on
 the droplet is therefore **not** wiped: a non-conflicting one survives into the
