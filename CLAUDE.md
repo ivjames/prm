@@ -46,7 +46,7 @@ prm deploy      # fetch + reset --hard origin/main, npm ci, build, migrate --sof
                 # pm2 start (whichever of the two is unregistered) / restart, probe, gated save
 prm restart     # pm2 restart prm-web prm-worker + probe, no code change
 prm status      # HEAD, pm2 state of prm-web and prm-worker, local + public probe, cert days
-prm logs        # tail their pm2 logs
+prm logs        # tail prm-web's pm2 logs; `prm logs worker` for prm-worker
 ```
 
 `prm` also carries `migrate [--soft]`, `ingest`, `backfill [days]`, `cadence`,
@@ -55,15 +55,22 @@ app-CLI template extended from one pm2 process to the two this checkout
 owns; what that means in practice:
 
 - **Every pm2 call runs from a scrubbed environment** — `env -i` plus `PATH`,
-  `HOME`, `LANG`, `PM2_HOME`/`TERM` if set, and `PORT`; never `--update-env`.
-  pm2 copies the environment of the `pm2 start` call into the process and
-  into `~/.pm2/dump.pm2`, so nothing exported in the shell that ran `deploy`
-  reaches either process or the dump. Both get `PORT` from the CLI and
-  everything else (Supabase, model, Deepgram, Google OAuth keys) from `.env`
-  via dotenv. There is no box-level key store; `.env` is the only copy.
-- **The port still lives only on the box.** The CLI reads `PORT` from
-  `/var/www/prm/.env` (`PRM_PORT` overrides) and has no built-in default;
-  without one, `deploy` and `restart` refuse rather than probe a guess.
+  `HOME`, `LANG`, and `PM2_HOME`/`TERM` if set; never `--update-env`. pm2
+  copies the environment of the `pm2 start` call into the process and into
+  `~/.pm2/dump.pm2`, so nothing exported in the shell that ran `deploy`
+  reaches either process or the dump. Unlike the other lab980 CLIs this one
+  does not hand in `PORT` either: both processes get everything — `PORT`,
+  Supabase, model, Deepgram, Google OAuth keys — from `.env` via dotenv, and
+  pm2 gives them only the `NODE_ENV` in `ecosystem.config.cjs`, exactly the
+  live registrations. There is no box-level key store; `.env` is the only
+  copy.
+- **The port still lives only on the box.** dotenv never overrides a variable
+  already in the environment and pm2 pins the start-time environment into
+  the dump, so a `PORT` handed in at first start would outlive a later `.env`
+  change — which is why it isn't. The CLI reads `PORT` from
+  `/var/www/prm/.env` (`PRM_PORT` overrides) only to know where to probe, and
+  has no built-in default; without one, `deploy` and `restart` refuse rather
+  than probe a guess.
 - **First start comes from `ecosystem.config.cjs`, one process at a time**
   (`pm2 start ecosystem.config.cjs --only prm-web`, then `--only
   prm-worker`) for whichever of the two is not registered; the rest get one
@@ -133,6 +140,8 @@ Full runbook, including first-time bring-up and `.env` keys: `DEPLOY.md`.
   leaving a failed build in `$d` to look at. A kitchen-sink `.gitignore`
   eating a source dir is the classic thing this catches; `git ls-files <dir>`
   confirms what is actually tracked.
-- pm2 process names are `prm-web` and `prm-worker`; `prm logs` tails them.
+- pm2 process names are `prm-web` and `prm-worker`; `prm logs` tails the
+  web, `prm logs worker` the worker (`pm2 logs` takes one name — the old
+  `pm2 logs prm-web prm-worker` only ever showed the web).
   A crash-looping worker with *empty* logs is the cluster-mode trap — check
   `~/.pm2/pm2.log`, not the app's own log.

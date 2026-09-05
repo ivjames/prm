@@ -65,13 +65,14 @@ Symlink the operate CLI onto PATH, then let its first `deploy` do the rest:
 ```sh
 ln -sf /var/www/prm/bin/prm /usr/local/bin/prm
 prm deploy    # npm ci, build, migrate --soft, pm2 start ecosystem.config.cjs --only prm-web
-              #   and --only prm-worker (scrubbed env, PORT from .env), probe, pm2 save
+              #   and --only prm-worker (scrubbed env; the app reads PORT from .env), probe, pm2 save
 ```
 
 Don't `pm2 start` by hand from a login shell: pm2 copies that shell's
 environment into the process and into `~/.pm2/dump.pm2`. The CLI launches
-every pm2 call as `env -i PATH=… HOME=… LANG=C.UTF-8 PORT=<port> pm2 …`, so
-both processes get `PORT` from it and everything else from `.env` via dotenv.
+every pm2 call as `env -i PATH=… HOME=… LANG=C.UTF-8 pm2 …` — no `PORT`, no
+keys — so both processes get everything, `PORT` included, from `.env` via
+dotenv, and pm2 hands them only the ecosystem file's `NODE_ENV`.
 Reboot survival needs the pm2 boot hook installed once per droplet (`pm2
 startup systemd -u root --hp /root`, run the line it prints, check
 `systemctl is-enabled pm2-root`); the `pm2 save` at the end of `deploy`
@@ -89,7 +90,7 @@ prm deploy     # fetch + reset --hard origin/main -> npm ci -> build -> migrate 
                #   -> pm2 start (if unregistered) / restart both -> probe -> pm2 save
 prm restart    # pm2 restart both + probe, no code change
 prm status     # HEAD, pm2 state of both, local + public probe, cert days
-prm logs       # tail both processes
+prm logs       # tail prm-web; `prm logs worker` for the worker; extra args go to pm2 logs
 prm migrate    # supabase db push (fails without the CLI; deploy's --soft only warns)
 prm backup     # snapshot .env + public schema into data/backups/
 ```
@@ -97,9 +98,9 @@ prm backup     # snapshot .env + public schema into data/backups/
 `deploy` exits non-zero, saving nothing, when `127.0.0.1:<PORT>` does not
 answer HTTP afterwards (any status counts; up to `PRM_PROBE_TRIES`, default
 10, tries a second apart). `pm2 save` runs only after that and only when
-every registered pm2 process is `online`. The port comes from `.env`
+every registered pm2 process is `online`. The probe port comes from `.env`
 (`PRM_PORT` overrides; no built-in default — the repo does not record it on
-purpose). Other overrides: `PRM_DIR`, `PRM_FQDN`, `PRM_BRANCH` (default
+purpose); the processes read the same `.env` themselves. Other overrides: `PRM_DIR`, `PRM_FQDN`, `PRM_BRANCH` (default
 `main`). A tracked file edited on the droplet is destroyed by the next
 deploy's hard reset — fix it in the repo; `.env` and `data/` survive.
 

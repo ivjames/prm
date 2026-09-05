@@ -9,7 +9,7 @@
 #
 #   prm deploy     fetch+reset -> npm ci -> build -> migrate --soft -> pm2 start/restart both -> probe -> save
 #   prm restart    pm2 restart both + probe, no code change
-#   prm logs       tail the pm2 logs for both processes
+#   prm logs       tail the pm2 logs for prm-web (or `logs worker`)
 #   prm status     HEAD, pm2 state of both, local + public probe, cert days
 #   prm migrate    apply Supabase migrations (supabase db push); --soft skips without the CLI
 #   prm ingest / cadence / cleanup / backfill [days]   one-shot worker runs
@@ -37,9 +37,10 @@ WEB="prm-web"               # the one that binds the port and gets probed
 
 # The port is not recorded in this repo on purpose (CLAUDE.md): provision-site
 # picked it at bring-up and wrote it into the app-dir .env, which config.ts
-# loads via dotenv. This script reads the same line (PRM_PORT overrides) and
-# hands it to pm2 as PORT — same value either way. There is deliberately no
-# baked-in fallback: a wrong guess here would probe the wrong port.
+# loads via dotenv. This script reads the same line (PRM_PORT overrides) for
+# the PROBE ONLY — it is never handed to pm2, see pm2_clean. There is
+# deliberately no baked-in fallback: a wrong guess here would probe the
+# wrong port.
 port() {   # empty when there is no .env or no PORT line (never fails)
   { grep -E '^[[:space:]]*(export[[:space:]]+)?PORT=' "$ROOT/.env" 2>/dev/null || true; } \
     | head -1 | sed 's/.*PORT=//' | tr -d '"'\'' \t\r'
@@ -53,8 +54,8 @@ need_port() { [ -n "$PORT" ] || die "$1: no PORT in $ROOT/.env (run provision-si
 # live in ecosystem.config.cjs (dist/server.js and dist/workers/index.js under
 # node, fork mode, max_restarts 10, NODE_ENV=production, cwd this dir) and are
 # started one at a time with --only, so a deploy that finds one of the two
-# missing starts just that one. The processes get PORT from pm2_clean below
-# and everything else from .env via dotenv.
+# missing starts just that one. The processes get everything, PORT included,
+# from .env via dotenv; pm2 hands them nothing but NODE_ENV from the file.
 start_cmd() { printf '%s\n' ecosystem.config.cjs --only "$1"; }
 
 c_blue=$'\033[1;34m'; c_yellow=$'\033[1;33m'; c_red=$'\033[1;31m'; c_off=$'\033[0m'
@@ -69,7 +70,7 @@ prm — operate prm.lab980.com (prm-web + prm-worker under pm2 behind nginx). Ap
 Usage:
   prm deploy               sync, npm ci, build, migrate --soft, pm2 start/restart both, probe, save
   prm restart              pm2 restart both + probe
-  prm logs [-n N]          tail pm2 logs for both processes
+  prm logs [web|worker] [-n N]   tail pm2 logs for one process (default web)
   prm status               HEAD + pm2 state of both + local/public probe + cert
   prm migrate [--soft]     apply Supabase migrations (supabase db push); --soft warns and continues without the CLI
   prm ingest               run one ingestion poll now (on-demand; doesn't wait for the cron)
@@ -97,7 +98,8 @@ need_root() {
 
 # ---------------------------------------------------------------------------
 # pm2. Every pm2 call goes through pm2_clean, which launches it from an EMPTY
-# environment plus the handful of variables pm2 itself needs and PORT. pm2
+# environment plus the handful of variables pm2 itself needs — and NOT PORT,
+# unlike the other lab980 CLIs (see below). pm2
 # copies the environment of the `pm2 start` call into the process, and from
 # there into ~/.pm2/dump.pm2 on save — so a plain `pm2 start` (or `pm2 restart
 # --update-env`, which re-captures the shell on every deploy) from a shell that
@@ -107,15 +109,20 @@ need_root() {
 # processes it starts do NOT inherit it), which is why jlist and logs go
 # through here as well.
 #
-# PORT is handed in because provision-site chose it, this script knows it
-# (from .env), and it is not a secret. Everything else — the Supabase keys,
-# the model key, Deepgram, Google OAuth — comes from .env via dotenv, never
-# from the shell that ran this script. A variable the app needs but does not
-# read from .env is an app change, not an argument to pass here.
+# PORT is deliberately NOT handed in, matching the live registrations (which
+# carry NODE_ENV only, from the ecosystem file). config.ts loads .env via
+# dotenv, which never overrides a variable already in the environment, and
+# pm2 pins the start-time environment into pm2_env and the dump: a PORT given
+# here at first start would outlive a later .env change, so the port would
+# stop living only on the box (CLAUDE.md). So both processes get everything,
+# PORT included, from .env at every (re)start — the Supabase keys, the model
+# key, Deepgram, Google OAuth — never from the shell that ran this script,
+# and this script's PORT is for the probe only. A variable the app needs but
+# does not read from .env is an app change, not an argument to pass here.
 # ---------------------------------------------------------------------------
 pm2_clean() {
   env -i PATH="$PATH" HOME="$HOME" ${PM2_HOME:+PM2_HOME="$PM2_HOME"} \
-    ${TERM:+TERM="$TERM"} LANG=C.UTF-8 ${PORT:+PORT="$PORT"} pm2 "$@"
+    ${TERM:+TERM="$TERM"} LANG=C.UTF-8 pm2 "$@"
 }
 
 # `pm2 jlist` is JSON only on a good day: pm2 writes chatter to STDOUT ahead
@@ -270,7 +277,7 @@ cmd_deploy() {
   cmd_migrate --soft
 
   start_or_restart "${states[@]}"
-  probe || die "$WEB is not answering on 127.0.0.1:$PORT — deploy failed, nothing saved. See: prm logs"
+  probe || die "$WEB is not answering on 127.0.0.1:$PORT — deploy failed, nothing saved. See: prm logs (and prm logs worker)"
   save_if_online
   log "deployed: $(git rev-parse --short HEAD)  $(git log -1 --format=%s)"
 }
@@ -289,7 +296,19 @@ cmd_restart() {
   pm2_clean restart "${APPS[@]}"
   probe || die "$WEB is not answering on 127.0.0.1:$PORT after restart. See: prm logs"
 }
-cmd_logs()    { pm2_clean logs "${APPS[@]}" "$@"; }
+# `pm2 logs` tails ONE process (a second name is ignored, so the old
+# `pm2 logs prm-web prm-worker` only ever showed the web). Pick with
+# web|worker; everything after that goes to pm2 logs (e.g. --lines 100).
+cmd_logs() {
+  local target="$WEB"
+  case "${1:-}" in
+    web)    shift;;
+    worker) shift; target="prm-worker";;
+    ""|-*)  ;;
+    *) die "unknown logs target: $1 (web or worker; see --help)";;
+  esac
+  pm2_clean logs "$target" "$@"
+}
 
 cmd_status() {
   [ $# -eq 0 ] || die "status takes no options (see --help)"
@@ -297,7 +316,7 @@ cmd_status() {
   printf 'checkout:  %s  %s\n' "$(git rev-parse --short HEAD)" "$(git log -1 --format=%s)"
   local name
   for name in "${APPS[@]}"; do
-    printf '%-11s%s\n' "$name:" "$(pm2_state "$name" || true)"
+    printf '%-12s%s\n' "$name:" "$(pm2_state "$name" || true)"
   done
   if [ -n "$PORT" ]; then probe || true   # status reports, it does not judge — keep going to the cert
   else warn "no PORT in $ROOT/.env — cannot probe the local port"; fi

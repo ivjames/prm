@@ -7,7 +7,7 @@
 //
 // Deploy (see DEPLOY.md): `prm deploy`. bin/prm starts whichever of the two
 // is not registered with `pm2 start ecosystem.config.cjs --only <name>` from a
-// scrubbed environment (env -i … PORT=<port>), restarts the rest, probes
+// scrubbed environment (env -i, no PORT — the app reads .env), restarts the rest, probes
 // prm-web and saves only when every pm2 process is online. Don't `pm2 start`
 // this file from a login shell — pm2 would copy that shell into the dump.
 //
