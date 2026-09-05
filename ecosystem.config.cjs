@@ -5,9 +5,11 @@
 //                one nginx proxies to). PORT comes from the app-dir .env.
 //   prm-worker — ingestion + cadence schedulers; binds no port.
 //
-// Deploy (see DEPLOY.md):
-//   cd /var/www/prm && npm ci && npm run build \
-//     && pm2 start ecosystem.config.cjs && pm2 save
+// Deploy (see DEPLOY.md): `prm deploy`. bin/prm starts whichever of the two
+// is not registered with `pm2 start ecosystem.config.cjs --only <name>` from a
+// scrubbed environment (env -i … PORT=<port>), restarts the rest, probes
+// prm-web and saves only when every pm2 process is online. Don't `pm2 start`
+// this file from a login shell — pm2 would copy that shell into the dump.
 //
 // config.ts loads .env via dotenv from cwd, so cwd must be the app dir.
 const cwd = __dirname;

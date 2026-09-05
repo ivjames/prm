@@ -1,77 +1,335 @@
 #!/usr/bin/env bash
-# prm — operate CLI for the PRM site on the lab980 droplet.
+# prm — operate CLI for prm.lab980.com (PRM).
 #
-# lab980 convention: each site ships bin/<name> symlinked onto PATH:
-#   ln -sf /var/www/prm/bin/prm /usr/local/bin/prm
+# A hybrid site: the backend is external Supabase; this droplet runs two pm2
+# processes from one checkout — prm-web (the PWA + API, the only one that
+# binds a port, which nginx proxies to) and prm-worker (ingestion + cadence
+# schedulers, binds none). Bring-up is `provision-site` (see DEPLOY.md); this
+# script owns everything after that:
 #
-# Subcommands: deploy · restart · logs · status · migrate · backup
+#   prm deploy     fetch+reset -> npm ci -> build -> migrate --soft -> pm2 start/restart both -> probe -> save
+#   prm restart    pm2 restart both + probe, no code change
+#   prm logs       tail the pm2 logs for both processes
+#   prm status     HEAD, pm2 state of both, local + public probe, cert days
+#   prm migrate    apply Supabase migrations (supabase db push); --soft skips without the CLI
+#   prm ingest / cadence / cleanup / backfill [days]   one-shot worker runs
+#   prm backup     .env + a schema snapshot into data/backups/
+#
+# Env overrides:
+#   PRM_DIR           the app dir (default: this script's own checkout)
+#   PRM_FQDN          default prm.lab980.com
+#   PRM_BRANCH        default main
+#   PRM_PORT          default: PORT from the app-dir .env (no other default — see port)
+#   PRM_PROBE_TRIES   default 10 (one second apart)
+#
+# The app dir is wherever this script's checkout lives (normally
+# /var/www/prm) — derived from the script's own path, so the /usr/local/bin
+# symlink resolves back here — unless PRM_DIR says otherwise.
 set -euo pipefail
 
-APP_DIR="${PRM_DIR:-/var/www/prm}"
-WEB_PROC="prm-web"
-WORKER_PROC="prm-worker"
+SELF="$(readlink -f "$0")"
+ROOT="${PRM_DIR:-$(cd "$(dirname "$SELF")/.." && pwd)}"
+FQDN="${PRM_FQDN:-prm.lab980.com}"
+BRANCH="${PRM_BRANCH:-main}"
+PROBE_TRIES="${PRM_PROBE_TRIES:-10}"
+APPS=(prm-web prm-worker)   # every pm2 process this checkout owns
+WEB="prm-web"               # the one that binds the port and gets probed
 
-c_blue=$'\033[1;34m'; c_red=$'\033[1;31m'; c_off=$'\033[0m'
-log() { printf '%s==>%s %s\n' "$c_blue" "$c_off" "$*"; }
-die() { printf '%serror:%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
+# The port is not recorded in this repo on purpose (CLAUDE.md): provision-site
+# picked it at bring-up and wrote it into the app-dir .env, which config.ts
+# loads via dotenv. This script reads the same line (PRM_PORT overrides) and
+# hands it to pm2 as PORT — same value either way. There is deliberately no
+# baked-in fallback: a wrong guess here would probe the wrong port.
+port() {   # empty when there is no .env or no PORT line (never fails)
+  { grep -E '^[[:space:]]*(export[[:space:]]+)?PORT=' "$ROOT/.env" 2>/dev/null || true; } \
+    | head -1 | sed 's/.*PORT=//' | tr -d '"'\'' \t\r'
+}
+PORT="${PRM_PORT:-$(port)}"
+need_port() { [ -n "$PORT" ] || die "$1: no PORT in $ROOT/.env (run provision-site first, or set PRM_PORT)."; }
+
+# The `pm2 start` argv that registers a process the FIRST time. Every later
+# deploy is a `pm2 restart` of that registration, but on a fresh box (or after
+# `pm2 delete`) nothing is registered and restart fails. Both registrations
+# live in ecosystem.config.cjs (dist/server.js and dist/workers/index.js under
+# node, fork mode, max_restarts 10, NODE_ENV=production, cwd this dir) and are
+# started one at a time with --only, so a deploy that finds one of the two
+# missing starts just that one. The processes get PORT from pm2_clean below
+# and everything else from .env via dotenv.
+start_cmd() { printf '%s\n' ecosystem.config.cjs --only "$1"; }
+
+c_blue=$'\033[1;34m'; c_yellow=$'\033[1;33m'; c_red=$'\033[1;31m'; c_off=$'\033[0m'
+log()  { printf '%s==>%s %s\n' "$c_blue" "$c_off" "$*"; }
+warn() { printf '%swarn:%s %s\n' "$c_yellow" "$c_off" "$*" >&2; }
+die()  { printf '%serror:%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
 
 usage() {
   cat <<USAGE
-prm — operate the PRM site (dir: $APP_DIR)
+prm — operate prm.lab980.com (prm-web + prm-worker under pm2 behind nginx). App dir: $ROOT
 
-Usage: prm <command>
+Usage:
+  prm deploy               sync, npm ci, build, migrate --soft, pm2 start/restart both, probe, save
+  prm restart              pm2 restart both + probe
+  prm logs [-n N]          tail pm2 logs for both processes
+  prm status               HEAD + pm2 state of both + local/public probe + cert
+  prm migrate [--soft]     apply Supabase migrations (supabase db push); --soft warns and continues without the CLI
+  prm ingest               run one ingestion poll now (on-demand; doesn't wait for the cron)
+  prm backfill [days]      deep historical pull, days back (default 180), paginated + filtered
+  prm cadence              run one cadence/overdue recompute now
+  prm cleanup              bulk-archive junk contacts (all-automated senders; reversible)
+  prm backup               dump the app-dir .env + a schema snapshot into data/backups/
 
-  deploy     git pull -> npm ci -> npm run build -> migrate -> pm2 restart -> pm2 save
-  restart    pm2 restart both processes
-  logs       tail pm2 logs (both processes)
-  status     pm2 status for the two processes
-  migrate    apply Supabase migrations (supabase db push)
-  ingest        run one ingestion poll now (on-demand; doesn't wait for the cron)
-  backfill [d]  deep historical pull, d days back (default 180), paginated + filtered
-  cadence       run one cadence/overdue recompute now (on-demand)
-  cleanup       bulk-archive junk contacts (all-automated senders; reversible)
-  backup     dump the app-dir .env + a schema snapshot into data/backups/
-  help       this text
+Env: PRM_DIR, PRM_FQDN, PRM_BRANCH (default main), PRM_PORT (default: PORT from .env),
+     PRM_PROBE_TRIES (default 10).
 USAGE
 }
 
-cd_app() { cd "$APP_DIR" || die "app dir $APP_DIR not found"; }
-
-cmd_deploy() {
-  cd_app
-  log "pulling latest"
-  git pull --ff-only
-  log "installing deps"
-  npm ci
-  log "building"
-  npm run build
-  log "applying migrations"
-  cmd_migrate --soft
-  log "restarting pm2"
-  pm2 restart "$WEB_PROC" "$WORKER_PROC" --update-env || pm2 start ecosystem.config.cjs
-  pm2 save
-  log "deployed"
+# The app runs as root under pm2, and pm2 keeps one daemon, process list and
+# dump PER HOME — root's is /root/.pm2. Run as anyone else, or as uid 0 with
+# someone else's HOME (`su root` without `-`, `sudo` preserving HOME), and
+# every pm2 call here talks to a different daemon: `status` says "not
+# registered" while the site is up, and `deploy` starts a second copy.
+need_root() {
+  [ "$(id -u)" -eq 0 ] || die "$1 must run as root (the app's pm2 daemon is root's)."
+  local rhome; rhome="$(getent passwd root | cut -d: -f6)"
+  [ -n "${PM2_HOME:-}" ] || [ "${HOME:-}" = "$rhome" ] \
+    || die "$1: HOME is '${HOME:-}' but root's home is $rhome — pm2 keys its daemon and dump off HOME, so this would talk to a different pm2. Use \`sudo -i\` or \`su -\` (or set PM2_HOME on purpose)."
 }
 
-cmd_restart() { pm2 restart "$WEB_PROC" "$WORKER_PROC" --update-env; }
-cmd_logs()    { pm2 logs "$WEB_PROC" "$WORKER_PROC"; }
-cmd_status()  { pm2 status "$WEB_PROC" "$WORKER_PROC"; }
+# ---------------------------------------------------------------------------
+# pm2. Every pm2 call goes through pm2_clean, which launches it from an EMPTY
+# environment plus the handful of variables pm2 itself needs and PORT. pm2
+# copies the environment of the `pm2 start` call into the process, and from
+# there into ~/.pm2/dump.pm2 on save — so a plain `pm2 start` (or `pm2 restart
+# --update-env`, which re-captures the shell on every deploy) from a shell that
+# happens to carry a key gives that key an indefinite on-disk lifetime in the
+# dump. The daemon itself keeps the environment of whichever call first
+# spawned it (visible in its /proc/<pid>/environ for as long as it runs; the
+# processes it starts do NOT inherit it), which is why jlist and logs go
+# through here as well.
+#
+# PORT is handed in because provision-site chose it, this script knows it
+# (from .env), and it is not a secret. Everything else — the Supabase keys,
+# the model key, Deepgram, Google OAuth — comes from .env via dotenv, never
+# from the shell that ran this script. A variable the app needs but does not
+# read from .env is an app change, not an argument to pass here.
+# ---------------------------------------------------------------------------
+pm2_clean() {
+  env -i PATH="$PATH" HOME="$HOME" ${PM2_HOME:+PM2_HOME="$PM2_HOME"} \
+    ${TERM:+TERM="$TERM"} LANG=C.UTF-8 ${PORT:+PORT="$PORT"} pm2 "$@"
+}
+
+# `pm2 jlist` is JSON only on a good day: pm2 writes chatter to STDOUT ahead
+# of it — `[PM2] Spawning PM2 daemon…` when the daemon was down, `>>>> In-memory
+# PM2 is out-of-date` after a pm2 upgrade (node22-bump does one). So the JSON
+# is taken from the first line that starts one and parses; anything else is
+# reported as unknown (exit 1), never guessed as "not registered" — deploy
+# would answer that guess with a second `pm2 start` against a live app.
+PM2_JSON='import json, sys
+lines = sys.stdin.read().split("\n")
+for i, line in enumerate(lines):
+    if line[:1] in "[{":
+        try:
+            procs = json.loads("\n".join(lines[i:]))
+        except ValueError:
+            continue
+        if isinstance(procs, list):
+            json.dump(procs, sys.stdout); sys.exit(0)
+sys.exit("no parseable JSON in pm2 jlist output")'
+pm2_jlist() {   # -> JSON array on stdout; 1 with the reason on stderr
+  local jl
+  jl="$(pm2_clean jlist 2>/dev/null)" || { echo "pm2 jlist failed" >&2; return 1; }
+  printf '%s' "$jl" | python3 -c "$PM2_JSON"
+}
+
+# pm2_state <name>: "not registered", "<status>  mode=…", or "unknown (…)"
+# with exit 1.
+pm2_state() {
+  local js
+  js="$(pm2_jlist 2>&1)" || { printf 'unknown (%s)\n' "$js"; return 1; }
+  printf '%s' "$js" | python3 -c 'import json, sys
+p = [x for x in json.load(sys.stdin) if x.get("name") == sys.argv[1]]
+if not p: print("not registered"); raise SystemExit
+e = p[0].get("pm2_env", {})
+print("%s  mode=%s  restarts=%s  uptime-since=%s" % (
+  e.get("status"), e.get("exec_mode"), e.get("restart_time"), e.get("pm_uptime")))' "$1"
+}
+
+# Names of registered processes that are not online (empty = all online);
+# exit 1 with the reason when the list cannot be read.
+pm2_not_online() {
+  local js
+  js="$(pm2_jlist 2>&1)" || { printf '%s' "$js"; return 1; }
+  printf '%s' "$js" | python3 -c 'import json, sys
+print(" ".join(x.get("name", "?") for x in json.load(sys.stdin)
+               if x.get("pm2_env", {}).get("status") != "online"))'
+}
+
+save_if_online() {
+  # pm2 save overwrites the dump with whatever is running right now, so a save
+  # while anything is down persists a dump that comes back short on the next
+  # reboot. The box rule (lab980 CLAUDE.md) is EVERY app online before a save,
+  # not just these two; otherwise say so and leave the previous dump alone.
+  local bad
+  if ! bad="$(pm2_not_online)"; then
+    warn "skipping pm2 save: cannot read the pm2 process list ($bad)"; return 0
+  fi
+  if [ -n "$bad" ]; then
+    warn "not every pm2 process is online ($bad) — skipping pm2 save so the dump keeps its last good state. Run \`pm2 save\` yourself once they are."
+    return 0
+  fi
+  pm2_clean save
+}
+
+probe() {
+  # Local first, then public: a healthy app behind a broken vhost and a dead
+  # app behind a fine vhost look identical from the outside, and telling them
+  # apart is most of the diagnosis. Both are printed whatever happens. Only
+  # prm-web binds a port, so only it is probed; the worker's health is its
+  # pm2 status (see status / logs).
+  #
+  # Pass/fail is the LOCAL port answering HTTP at all — any status code —
+  # retried up to PROBE_TRIES times a second apart, since a Node app is often
+  # still booting when pm2 first reports it online. The public side only
+  # warns: it also depends on DNS and TLS, which may legitimately not be
+  # there yet on a first bring-up.
+  local lcode="" pcode i
+  for ((i = 1; i <= PROBE_TRIES; i++)); do
+    lcode="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:$PORT/" || true)"
+    [ "$lcode" != "000" ] || lcode=""   # curl's code for "never connected"
+    [ -z "$lcode" ] || break
+    sleep 1
+  done
+  pcode="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://$FQDN/" || true)"
+  [ "$pcode" != "000" ] || pcode=""
+  printf 'local:     http://127.0.0.1:%s/  ->  HTTP %s\n' "$PORT" "${lcode:-unreachable after $PROBE_TRIES tries}"
+  printf 'public:    https://%s/  ->  HTTP %s\n' "$FQDN" "${pcode:-unreachable}"
+  [ -n "$lcode" ] || return 1
+  case "$pcode" in
+    ""|5*) warn "app answers locally but https://$FQDN/ is ${pcode:-unreachable} — look at nginx / DNS / TLS, not the app";;
+  esac
+}
+
+# Start whichever of $APPS is not registered, restart the rest — in that
+# order, so a half-registered box (one process deleted by hand) comes back
+# whole. Takes the pre-sync states as "name=state" args.
+start_or_restart() {
+  local entry name state to_restart=()
+  for entry in "$@"; do
+    name="${entry%%=*}"; state="${entry#*=}"
+    if [ "$state" = "not registered" ]; then
+      log "pm2 start $(start_cmd "$name" | tr '\n' ' ') ($name, first registration)"
+      # shellcheck disable=SC2046
+      pm2_clean start $(start_cmd "$name")
+      state="$(pm2_state "$name")" || die "pm2 start ran but the process list is unreadable — $state"
+      [ "$state" != "not registered" ] \
+        || die "pm2 start ran but nothing named $name is registered — ecosystem.config.cjs must carry an entry named $name."
+    else
+      to_restart+=("$name")
+    fi
+  done
+  if [ ${#to_restart[@]} -gt 0 ]; then
+    log "pm2 restart ${to_restart[*]}"
+    pm2_clean restart "${to_restart[@]}"
+  fi
+}
+
+cd_app() { cd "$ROOT" 2>/dev/null || die "app dir $ROOT not found"; }
+
+cmd_deploy() {
+  [ $# -eq 0 ] || die "unknown deploy option: $1 (see --help)"
+  need_root deploy
+  need_port deploy
+  command -v pm2 >/dev/null || die "pm2 not found on PATH."
+  cd_app
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "$ROOT is not a git clone."
+
+  # Decide start-vs-restart for each process BEFORE the sync: a first deploy
+  # that cannot start should fail here, not after a hard reset and an npm ci
+  # it did not need.
+  local name state states=()
+  for name in "${APPS[@]}"; do
+    state="$(pm2_state "$name")" || die "cannot tell whether $name is registered — $state. Sort pm2 out first (pm2 ls), then deploy again."
+    states+=("$name=$state")
+  done
+
+  local before after
+  before="$(git rev-parse --short HEAD)"
+  log "Syncing $ROOT to origin/$BRANCH"
+  git fetch --quiet origin "$BRANCH"
+  git reset --hard --quiet "origin/$BRANCH"
+  after="$(git rev-parse --short HEAD)"
+  if [ "$before" = "$after" ]; then log "already current ($after)"
+  else log "$before -> $after"; git --no-pager log --oneline "$before..$after"; fi
+
+  # npm ci, not npm install: the lockfile is the deployed dependency set, and
+  # a deploy that silently resolves different versions than CI tested is the
+  # bug you find at 2am.
+  log "npm ci"; npm ci
+  log "npm run build"; npm run build
+  log "applying migrations"
+  cmd_migrate --soft
+
+  start_or_restart "${states[@]}"
+  probe || die "$WEB is not answering on 127.0.0.1:$PORT — deploy failed, nothing saved. See: prm logs"
+  save_if_online
+  log "deployed: $(git rev-parse --short HEAD)  $(git log -1 --format=%s)"
+}
+
+cmd_restart() {
+  [ $# -eq 0 ] || die "restart takes no options (see --help)"
+  need_root restart
+  need_port restart
+  command -v pm2 >/dev/null || die "pm2 not found on PATH."
+  local name state
+  for name in "${APPS[@]}"; do
+    state="$(pm2_state "$name")" || die "cannot tell whether $name is registered — $state. Sort pm2 out first (pm2 ls), then retry."
+    [ "$state" != "not registered" ] || die "$name is not registered with pm2 — nothing to restart. First start is: prm deploy"
+  done
+  log "pm2 restart ${APPS[*]}"
+  pm2_clean restart "${APPS[@]}"
+  probe || die "$WEB is not answering on 127.0.0.1:$PORT after restart. See: prm logs"
+}
+cmd_logs()    { pm2_clean logs "${APPS[@]}" "$@"; }
+
+cmd_status() {
+  [ $# -eq 0 ] || die "status takes no options (see --help)"
+  cd_app
+  printf 'checkout:  %s  %s\n' "$(git rev-parse --short HEAD)" "$(git log -1 --format=%s)"
+  local name
+  for name in "${APPS[@]}"; do
+    printf '%-11s%s\n' "$name:" "$(pm2_state "$name" || true)"
+  done
+  if [ -n "$PORT" ]; then probe || true   # status reports, it does not judge — keep going to the cert
+  else warn "no PORT in $ROOT/.env — cannot probe the local port"; fi
+  local pem="/etc/letsencrypt/live/$FQDN/cert.pem"
+  if [ -r "$pem" ]; then
+    local end days
+    end="$(openssl x509 -enddate -noout -in "$pem" | cut -d= -f2)"
+    days=$(( ($(date -d "$end" +%s) - $(date +%s)) / 86400 ))
+    printf 'cert:      %s days remaining (expires %s)\n' "$days" "$end"
+  else
+    printf 'cert:      (run as root to read expiry)\n'
+  fi
+}
 
 # On-demand worker runs. The worker's --once mode runs the job a single time and
 # exits non-zero on failure, so these surface errors directly (unlike the
 # scheduler, which swallows them). Needs a prior `npm run build` (deploy does it).
+# These run from the operator's shell, not under pm2: the worker loads .env via
+# dotenv from cwd, which is why cd_app comes first.
 cmd_once() {
   cd_app
   [ -f dist/workers/index.js ] || die "dist/workers/index.js not found — run 'npm run build' (or 'prm deploy') first."
   log "running one-shot: $1"
   node dist/workers/index.js --once "$1"
 }
-cmd_ingest()  { cmd_once ingest; }
-cmd_cadence() { cmd_once cadence; }
-cmd_cleanup() { cmd_once cleanup; }
+cmd_ingest()  { [ $# -eq 0 ] || die "ingest takes no options (see --help)";  cmd_once ingest; }
+cmd_cadence() { [ $# -eq 0 ] || die "cadence takes no options (see --help)"; cmd_once cadence; }
+cmd_cleanup() { [ $# -eq 0 ] || die "cleanup takes no options (see --help)"; cmd_once cleanup; }
 # backfill [days]: deep historical pull. Passes the day count via env so the
 # worker's config picks it up; empty -> default (180).
 cmd_backfill() {
+  [ $# -le 1 ] || die "backfill takes at most one argument, the day count (see --help)"
   cd_app
   [ -f dist/workers/index.js ] || die "dist/workers/index.js not found — run 'npm run build' (or 'prm deploy') first."
   log "backfilling history (${1:-default} days) — this can take a few minutes"
@@ -85,9 +343,17 @@ cmd_backfill() {
 # CLI is absent, so a deploy is never blocked by it; a bare `prm migrate` still
 # fails loudly, since calling it directly is an explicit request to migrate.
 cmd_migrate() {
+  local soft=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --soft) soft=1;;
+      *) die "unknown migrate option: $1 (see --help)";;
+    esac
+    shift
+  done
   cd_app
   if ! command -v supabase >/dev/null; then
-    if [ "${1:-}" = "--soft" ]; then
+    if [ "$soft" -eq 1 ]; then
       log "supabase CLI not found — skipping migrations (apply them via the Supabase dashboard or a linked CLI; see DEPLOY.md)"
       return 0
     fi
@@ -98,6 +364,7 @@ cmd_migrate() {
 }
 
 cmd_backup() {
+  [ $# -eq 0 ] || die "backup takes no options (see --help)"
   cd_app
   local stamp dest
   stamp="$(date +%Y%m%d-%H%M%S)"
@@ -108,20 +375,20 @@ cmd_backup() {
   if command -v supabase >/dev/null; then
     supabase db dump --schema public -f "$dest/schema.sql" 2>/dev/null || true
   fi
-  log "backup written to $APP_DIR/$dest"
+  log "backup written to $ROOT/$dest"
 }
 
-case "${1:-help}" in
-  deploy)  cmd_deploy;;
-  restart) cmd_restart;;
-  logs)    cmd_logs;;
-  status)  cmd_status;;
-  migrate) cmd_migrate;;
-  ingest)   cmd_ingest;;
-  backfill) cmd_backfill "${2:-}";;
-  cadence)  cmd_cadence;;
-  cleanup)  cmd_cleanup;;
-  backup)  cmd_backup;;
-  help|-h|--help) usage;;
-  *) usage; exit 1;;
+case "${1:-}" in
+  deploy)   shift; cmd_deploy "$@";;
+  restart)  shift; cmd_restart "$@";;
+  logs)     shift; cmd_logs "$@";;
+  status)   shift; cmd_status "$@";;
+  migrate)  shift; cmd_migrate "$@";;
+  ingest)   shift; cmd_ingest "$@";;
+  backfill) shift; cmd_backfill "$@";;
+  cadence)  shift; cmd_cadence "$@";;
+  cleanup)  shift; cmd_cleanup "$@";;
+  backup)   shift; cmd_backup "$@";;
+  -h|--help|help|"") usage;;
+  *) die "unknown command: $1 (see --help)";;
 esac
