@@ -30,7 +30,7 @@ src/
 supabase/migrations/   0001 schema · 0002 RLS · 0003 token vault · 0004 cadence
 web/                   static PWA shell (placeholder for the Capacitor build)
 ecosystem.config.cjs   pm2: prm-web + prm-worker
-bin/prm                operate CLI (deploy/restart/logs/migrate/backup)
+bin/prm                operate CLI (deploy/restart/logs/status/migrate/backup + worker one-shots)
 ```
 
 ## Auth
